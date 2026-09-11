@@ -29,6 +29,7 @@ try {
 }
 
 let control = null;
+const terminalPending = [];
 
 // [optimize] Native codecs (Phase 2 #11 zlib, #12 crypto): the Rust/Wasm cores
 // beneath Node's real lib/zlib.js and our lib/crypto.js. The kernel worker
@@ -99,6 +100,7 @@ self.onmessage = async (event) => {
       send: (msgType, extra) => self.postMessage({ type: msgType, ...extra }),
       onReady: (c) => {
         control = c;
+        for (const m of terminalPending.splice(0)) control.dispatchTerminal(m);
       },
       codec: makeZStream,
       cryptoCodec,
@@ -139,6 +141,10 @@ self.onmessage = async (event) => {
     control && control.dispatchPipe(event.data);
   // An interactive stdin chunk for this process (host terminal / parent -> child).
   else if (type === "stdin") control && control.dispatchStdin(event.data);
+  else if (type === "terminal-event") {
+    if (control) control.dispatchTerminal(event.data);
+    else terminalPending.push(event.data);
+  }
   // An async fetch result relayed by the kernel (parallel downloads).
   else if (type === "fetch-done") control && control.dispatchFetch(event.data);
 };

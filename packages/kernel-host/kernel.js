@@ -307,12 +307,14 @@ export class Kernel {
 
   // ---- process lifecycle ----------------------------------------------------
   createProcess(spec, { parentPid = null, capture = false, stream = false, threadPort = null } = {}) {
+    const terminal = this.procs.get(parentPid)?.terminal || (spec.terminal ? this.terminalSize(spec.terminal) : null);
     const pid = this.nextPid++;
     const sab = new SharedArrayBuffer(SAB_BYTES);
     const { ctrl, data } = makeViews(sab);
     const proc = {
       pid,
       parentPid,
+      terminal,
       capture,
       // #15: async children stream their output to the *parent worker* (so its
       // event loop can react live) instead of buffering (capture) or going to the
@@ -341,7 +343,7 @@ export class Kernel {
     proc.handle = this.spawnWorker({
       pid,
       sab,
-      spec: { ...spec, pid, ppid: parentPid ?? 0 },
+      spec: { ...spec, terminal, pid, ppid: parentPid ?? 0 },
       // #16 stage 2b: a spawned thread gets its creator's MessageChannel end as a
       // transferable, delivered to the worker as parentPort at init.
       threadPort,
@@ -349,6 +351,10 @@ export class Kernel {
         syscall: () => this.serviceSyscall(pid),
         stdout: (m) => this.onOutput(pid, m.chunk, false),
         stderr: (m) => this.onOutput(pid, m.chunk, true),
+        "stdio-overflow": (m) => {
+          if (this.onStdioOverflow) this.onStdioOverflow(pid, m.channel);
+          this.finalize(pid, 143, "SIGTERM");
+        },
         exit: (m) => this.finalize(pid, m.code | 0),
         // #16 stage 2b: this process' worker_threads asks the kernel to spawn /
         // terminate a nested thread worker.
@@ -392,7 +398,7 @@ export class Kernel {
     const proc = this.procs.get(pid);
     if (!proc) return;
     if (proc.capture) {
-      (isErr ? proc.errBuf : proc.outBuf).push(chunk);
+      (isErr ? proc.errBuf : proc.outBuf).push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
       return;
     }
     if (proc.stream) {
@@ -435,7 +441,10 @@ export class Kernel {
     // Drop any ports this process was serving and fail its in-flight requests,
     // so a fetch that was waiting on a now-dead server does not hang forever.
     for (const [port, owner] of this.listeners) {
-      if (owner === pid) this.listeners.delete(port);
+      if (owner === pid) {
+        this.listeners.delete(port);
+        if (this.onCloseServer) this.onCloseServer(port, pid);
+      }
     }
     for (const [reqId, pend] of this.pendingHttp) {
       if (pend.pid === pid) {
@@ -501,7 +510,7 @@ export class Kernel {
     const programPath = this.resolveProgram(command, cwd, opts.env || {});
     if (!programPath) return -1;
     return this.createProcess(
-      { programPath, args, cwd, env: opts.env || {} },
+      { programPath, args, cwd, env: opts.env || {}, terminal: opts.terminal, stdioCredits: opts.stdioCredits },
       { capture: !!opts.capture },
     );
   }
@@ -521,7 +530,7 @@ export class Kernel {
         return;
       }
       const pid = this.createProcess(
-        { command, programPath, args, cwd, env: opts.env || {} },
+        { command, programPath, args, cwd, env: opts.env || {}, terminal: opts.terminal },
         { capture: !!opts.capture },
       );
       this.procs.get(pid).onExit = resolve;
@@ -607,7 +616,10 @@ export class Kernel {
     }
     // OP_CLOSE_SERVER
     const port = msg.port | 0;
-    if (this.listeners.get(port) === proc.pid) this.listeners.delete(port);
+    if (this.listeners.get(port) === proc.pid) {
+      this.listeners.delete(port);
+      if (this.onCloseServer) this.onCloseServer(port, proc.pid);
+    }
     this.respondOk(proc, EMPTY);
   }
 
@@ -930,8 +942,36 @@ export class Kernel {
       return;
     }
     const signal = msg.signal || "SIGTERM";
+    if (!["SIGINT", "SIGTERM", "SIGKILL"].includes(signal)) {
+      this.respondErr(proc, "ENOTSUP");
+      return;
+    }
     this.respondOk(proc, EMPTY);
+    if (signal === "SIGINT") {
+      this.postToProc(pid, { type: "terminal-event", signal });
+      return;
+    }
     this.finalize(pid, signal === "SIGKILL" ? 137 : 143, signal);
+  }
+
+  terminalSize(size) {
+    if (![size.cols, size.rows].every(n => Number.isInteger(n) && n > 0 && n <= 65535))
+      throw new RangeError("Terminal cols/rows must be integers from 1 to 65535");
+    return { cols: size.cols, rows: size.rows };
+  }
+
+  resizeTerminal(pid, size) {
+    const next = this.terminalSize(size);
+    const owner = this.procs.get(pid);
+    if (!owner) return;
+    if (!owner.terminal) owner.terminal = { cols: 80, rows: 24 };
+    const terminal = owner.terminal;
+    if (terminal.cols === next.cols && terminal.rows === next.rows) return;
+    Object.assign(terminal, next);
+    for (const proc of this.procs.values()) {
+      if (proc.terminal === terminal)
+        this.postToProc(proc.pid, { type: "terminal-event", ...next });
+    }
   }
 
   // ---- worker_threads brokering (#16 stage 2b) ------------------------------

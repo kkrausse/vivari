@@ -14,11 +14,12 @@
 // Bun.gzipSync/…, Bun.inspect/deepEquals/escapeHTML, Bun.pathToFileURL/fileURLToPath,
 // and the modules bun:test (a minimal runner + expect) and bun:jsc (small stubs).
 //
-// NOT SUPPORTED (documented, fails loudly rather than silently wrong): bun:ffi /
+// bun:ffi supports explicit WASM artifacts via ffi.js. NOT SUPPORTED:
 // Bun.dlopen (native FFI), native addons, Bun macros, and Bun.build plugins. These
 // require capabilities the browser sandbox does not have.
 
 import { transpileTypeScript } from "../typescript-transform.js";
+import { makeWasmFfi, makeNodeWasmFfi } from "./ffi.js";
 
 export function createBunRuntime({ process, Buffer, require }) {
   const lazy = (name) => require(name);
@@ -617,10 +618,13 @@ export function createBunRuntime({ process, Buffer, require }) {
   };
 
   // ---- bun:* modules ---------------------------------------------------------
+  const ffi = makeWasmFfi({ require });
   const modules = {
+    "bun": Bun,
     "bun:test": makeBunTest({ process }),
     "bun:jsc": makeBunJsc(),
-    "bun:ffi": makeBunFfi(),
+    "bun:ffi": ffi,
+    "node:ffi": makeNodeWasmFfi(ffi),
     "bun:sqlite": makeBunSqlite({ require }),
   };
 
@@ -800,21 +804,7 @@ function makeBunJsc() {
   };
 }
 
-// bun:ffi — documented as unsupported (native FFI). We export the symbols so an
-// `import { dlopen } from "bun:ffi"` doesn't crash at load, but any actual use
-// throws a clear error rather than corrupting memory.
-function makeBunFfi() {
-  const unsupported = () => { throw new Error("bun:ffi (native FFI) is not supported in Vivari (browser sandbox)"); };
-  return {
-    dlopen: unsupported,
-    CString: class CString {},
-    ptr: unsupported,
-    toArrayBuffer: unsupported,
-    FFIType: {},
-    suffix: "so",
-    read: {},
-  };
-}
+// The WASM FFI substrate is shared by every consumer of the explicit artifact ABI.
 
 // bun:sqlite — API surface backed by a project-installed wasm SQLite when present
 // (e.g. a `sql.js`/`@sqlite.org/sqlite-wasm` drop-in). Without a backend it throws

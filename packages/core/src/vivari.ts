@@ -74,6 +74,7 @@ export class Vivari {
       );
     }
     const bridge = new KernelBridge({ workerName: options.workerName });
+    if (options.onLog) bridge.on("log", (m) => options.onLog!(String(m.line ?? "")));
     const vivari = new Vivari(bridge);
 
     if (options.serviceWorkerUrl !== false) {

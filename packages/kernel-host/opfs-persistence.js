@@ -38,9 +38,20 @@ const MANIFEST = "manifest.json";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-export async function createOpfsPersistence({ access, shouldPersist = () => true }) {
+export async function createOpfsPersistence({ access, shouldPersist = () => true, rootName = ROOT_DIR }) {
+  // The mirror is authoritative for one kernel. A second kernel on this origin
+  // must not overwrite its manifest or database snapshots. Worker termination
+  // releases this browser-owned lease, including on page reload/crash.
+  if (!navigator.locks) throw new Error("OPFS ownership requires Web Locks");
+  await new Promise((resolve, reject) => {
+    navigator.locks.request(rootName === ROOT_DIR ? "vivari-vfs-owner" : `vivari-vfs-owner:${rootName}`, { ifAvailable: true }, lock => {
+      if (!lock) { reject(new Error("OPFS already owned by another Vivari kernel")); return; }
+      resolve();
+      return new Promise(() => {});
+    }).catch(reject);
+  });
   const origin = await navigator.storage.getDirectory();
-  const base = await origin.getDirectoryHandle(ROOT_DIR, { create: true });
+  const base = await origin.getDirectoryHandle(rootName, { create: true });
   const filesBase = await base.getDirectoryHandle(FILES_DIR, { create: true });
 
   // path (VFS absolute) -> { k:'file'|'dir'|'symlink', m:mode, t:target? }
@@ -49,6 +60,7 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
   const pending = new Map();
   let draining = false;
   let manifestDirty = false;
+  const errors = new Map();
 
   const parts = (p) => p.split("/").filter(Boolean);
 
@@ -68,13 +80,13 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
   async function writeBytes(path, bytes) {
     const [dir, name] = await parentFor(path, true);
     const fh = await dir.getFileHandle(name, { create: true });
-    const ah = await fh.createSyncAccessHandle();
+    const stream = await fh.createWritable();
     try {
-      ah.truncate(0);
-      if (bytes && bytes.length) ah.write(bytes, { at: 0 });
-      ah.flush();
-    } finally {
-      ah.close();
+      await stream.write(bytes);
+      await stream.close(); // atomic replacement; previous bytes survive abort
+    } catch (error) {
+      try { await stream.abort(); } catch { /* retain the original write error */ }
+      throw error;
     }
   }
   async function readBytes(path) {
@@ -101,14 +113,14 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
   async function writeManifest() {
     const arr = [...meta.entries()];
     const fh = await base.getFileHandle(MANIFEST, { create: true });
-    const ah = await fh.createSyncAccessHandle();
+    const stream = await fh.createWritable();
     try {
       const bytes = enc.encode(JSON.stringify(arr));
-      ah.truncate(0);
-      ah.write(bytes, { at: 0 });
-      ah.flush();
-    } finally {
-      ah.close();
+      await stream.write(bytes);
+      await stream.close();
+    } catch (error) {
+      try { await stream.abort(); } catch { /* retain original error */ }
+      throw error;
     }
   }
 
@@ -160,8 +172,9 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
             meta.set(path, { k: e.kind, m: e.mode | 0, t: e.target });
             manifestDirty = true;
           }
-        } catch {
-          /* keep draining; a single bad entry shouldn't wedge the queue */
+          errors.delete(path);
+        } catch (error) {
+          errors.set(path, error);
         }
       }
       if (manifestDirty) {
@@ -170,8 +183,9 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
         try {
           await writeManifest();
           manifestDirty = false;
-        } catch {
-          /* retry on the next drain */
+          errors.delete(MANIFEST);
+        } catch (error) {
+          errors.set(MANIFEST, error);
         }
       }
     } finally {
@@ -187,6 +201,7 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
       while (draining) await new Promise((r) => setTimeout(r, 0));
     }
     if (pending.size || manifestDirty) await drain();
+    if (errors.size) throw new Error("OPFS persistence failed: " + [...errors].map(([p, e]) => `${p}: ${e}`).join("; "));
   }
 
   // ---- boot restore --------------------------------------------------------
@@ -208,8 +223,9 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
           ah.close();
         }
       })()));
-    } catch {
-      return 0; // no manifest → first run
+    } catch (error) {
+      if (error.name === "NotFoundError") return 0;
+      throw error;
     }
     if (!Array.isArray(arr) || arr.length === 0) return 0;
 
@@ -281,13 +297,13 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
         // restore shows a moving count instead of a long silent stall.
         if (typeof onProgress === "function" && n % Math.max(200, Math.ceil(total / 20)) === 0)
           onProgress(n, total);
-      } catch {
-        /* skip a corrupt entry, keep restoring the rest */
+      } catch (error) {
+        throw new Error(`OPFS restore failed for ${path}: ${error}`);
       }
     }
     if (typeof onProgress === "function") onProgress(n, total);
     return n;
   }
 
-  return { onWrite, onDelete, onRename, flush, restore };
+  return { onWrite, onDelete, onRename, flush, restore, shouldPersist };
 }

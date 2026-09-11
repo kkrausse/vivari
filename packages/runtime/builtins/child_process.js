@@ -281,10 +281,23 @@ export function createChildProcess({ sys, process, Buffer, EventEmitter, Readabl
     // Tools rely on this to surface a nested process's logs (Nest spawns the app
     // with {stdio:'inherit'}; without this its bootstrap logs never appear).
     const stdio = n.opts.stdio;
+    const inheritIn = stdio === "inherit" || (Array.isArray(stdio) && stdio[0] === "inherit");
     const inheritOut = stdio === "inherit" || (Array.isArray(stdio) && stdio[1] === "inherit");
     const inheritErr = stdio === "inherit" || (Array.isArray(stdio) && stdio[2] === "inherit");
     if (inheritOut) cp.stdout.on("data", (d) => process.stdout.write(d));
     if (inheritErr) cp.stderr.on("data", (d) => process.stderr.write(d));
+    if (inheritIn) {
+      const input = chunk => cp.stdin.write(chunk);
+      const end = () => cp.stdin.end();
+      process.stdin.on("data", input);
+      process.stdin.once("end", end);
+      cp.once("exit", () => {
+        process.stdin.removeListener("data", input);
+        process.stdin.removeListener("end", end);
+        if (process.stdin.listenerCount("data") === 0) process.stdin.pause();
+      });
+      if (process.stdin.readableEnded) end();
+    }
     process.nextTick(() => cp.emit("spawn"));
     return cp;
   }
@@ -304,9 +317,9 @@ export function createChildProcess({ sys, process, Buffer, EventEmitter, Readabl
       const cp = registry.get(m.childPid);
       if (!cp) continue;
       if (m.type === "child-stdout") {
-        cp.stdout.push(m.chunk == null ? null : Buffer.from(String(m.chunk), "utf8"));
+        cp.stdout.push(m.chunk == null ? null : Buffer.from(m.chunk));
       } else if (m.type === "child-stderr") {
-        cp.stderr.push(m.chunk == null ? null : Buffer.from(String(m.chunk), "utf8"));
+        cp.stderr.push(m.chunk == null ? null : Buffer.from(m.chunk));
       } else if (m.type === "child-exit") {
         registry.delete(m.childPid);
         if (childLiveness.active > 0) childLiveness.active--;

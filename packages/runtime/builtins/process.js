@@ -16,6 +16,13 @@ export function createProcess({ pid = 1, ppid = 0, argv = [], env = {}, cwd = "/
   // so byte writes (e.g. Go's wasm_exec writing to fd 1) must be decoded, not
   // stringified. Honour a string encoding arg (Node's write(chunk, encoding)).
   const decodeChunk = (chunk, encoding) => {
+    // Opt-in SDK byte channel; legacy terminals continue receiving text.
+    if (env.VV_BYTE_STDIO === "1") {
+      if (typeof chunk === "string") return globalThis.Buffer.from(chunk, typeof encoding === "string" ? encoding : "utf8");
+      if (ArrayBuffer.isView(chunk)) return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength).slice();
+      if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk.slice(0));
+      throw new TypeError("stdio expects a string or byte buffer");
+    }
     if (typeof chunk === "string") return chunk;
     const enc = typeof encoding === "string" ? encoding : "utf8";
     const B = globalThis.Buffer;
@@ -223,6 +230,27 @@ export function createProcess({ pid = 1, ppid = 0, argv = [], env = {}, cwd = "/
     },
     emit: () => false,
     features: {},
+  };
+  process.emitWarning = (warning, type, code, ctor) => {
+    const options = type && typeof type === "object" ? type : { type, code, ctor };
+    if (typeof warning !== "string" && !(warning instanceof Error)) throw new TypeError('warning must be a string or Error');
+    for (const key of ['type', 'code', 'detail']) {
+      if (options[key] !== undefined && typeof options[key] !== 'string') throw new TypeError(`${key} must be a string`);
+    }
+    if (options.ctor !== undefined && typeof options.ctor !== 'function') throw new TypeError('ctor must be a function');
+    const error = warning instanceof Error ? warning : new Error(warning);
+    if (!(warning instanceof Error)) {
+      error.name = options.type || 'Warning';
+      if (options.code !== undefined) error.code = options.code;
+      if (options.detail !== undefined) error.detail = options.detail;
+      Error.captureStackTrace?.(error, options.ctor || process.emitWarning);
+    }
+    if (error.name === 'DeprecationWarning' && process.noDeprecation) return;
+    process.nextTick(() => {
+      if (error.name === 'DeprecationWarning' && process.throwDeprecation) throw error;
+      process.emit('warning', error);
+      if (!process.noWarnings) process.stderr.write(`(${process.name || 'node'}:${process.pid}) ${error.code ? '[' + error.code + '] ' : ''}${error.name}: ${error.message}\n${error.detail ? error.detail + '\n' : ''}`);
+    });
   };
   return process;
 }

@@ -56,6 +56,7 @@ import {
   OP_PIPE_LISTEN,
   OP_PIPE_CONNECT,
   OP_PIPE_CLOSE_SERVER,
+  OP_SQLITE,
 } from "../protocol/syscall.js";
 
 // Cap each fd read/write to keep both request and response inside the 1 MiB
@@ -93,6 +94,7 @@ export function createSyscalls({ ctrl, data, notify }) {
   }
 
   return {
+    sqlite: (input) => call(OP_SQLITE, encodeRequest([b(input)])),
     readFile: (p) => call(OP_READ_FILE, encodeRequest([b(p)])),
     writeFile: (p, content) => {
       const body = typeof content === "string" ? b(content) : content;

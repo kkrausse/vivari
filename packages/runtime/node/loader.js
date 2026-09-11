@@ -53,6 +53,7 @@ import encodingFactory from "./internal/encoding.js";
 // stream (Phase 2 #6): Node's real lib/stream.js + internal/streams/* verbatim.
 import streamFactory from "./lib/stream.js";
 import streamPromisesFactory from "./lib/stream/promises.js";
+import streamConsumersFactory from "./lib/stream/consumers.js";
 import streamsLegacyFactory from "./internal/streams/legacy.js";
 import streamsDestroyFactory from "./internal/streams/destroy.js";
 import streamsStateFactory from "./internal/streams/state.js";
@@ -215,6 +216,7 @@ const FACTORIES = {
   "internal/encoding": encodingFactory,
   stream: streamFactory,
   "stream/promises": streamPromisesFactory,
+  "stream/consumers": streamConsumersFactory,
   // `stream/web` = the WHATWG streams, which the host realm provides as globals.
   // @edge-runtime/primitives (pulled by Next.js) does `require('stream/web')`.
   "stream/web": (exports, require, module) => {

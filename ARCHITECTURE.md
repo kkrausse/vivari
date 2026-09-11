@@ -1,5 +1,207 @@
 # Vivari — Architecture
 
+## Workspace API continuation (workspace-v1)
+
+The core library build uses a relative Vite base so nested worker and SQLite
+helper URLs remain inside the consumer's distribution mount (e.g. `/runtime/`).
+Root-absolute `/assets/` URLs strand nested FS workers before readiness.
+
+The enclosing workspace-api owns a storage/supervisor worker lifetime separately
+from runtime execution ownership. Runtime stop kills its tracked process trees;
+only workspace close terminates the supervisor and its authoritative FS worker.
+New `workspace-write` RPC uses the existing batch transfer (binary/large files).
+`workspace-read` returns bytes directly from the FS worker, bypassing the 1 MiB
+SAB response limit; the headless FS worker implements the same byte-read RPC.
+`workspace-flush` travels to the FS worker and acknowledges OPFS flush or returns
+its concrete failure; `workspace-persistence` reports initialization state. Existing
+node_modules exclusions and SQLite quarantine semantics remain in force.
+FS `onMutation` relays guest and host watch notifications to the embedding API.
+
+`VV_BYTE_STDIO=1` selects raw byte writes before process output loses encoding;
+legacy terminal output stays text. `proc-exit` now includes forced signal metadata.
+`onCloseServer` observes explicit close and process finalization. Each browser
+listener carries a random supervisor generation plus monotonic listener sequence.
+The workspace preview URL's reserved `__vv_listener` query binds initial navigation
+and iframe subrequests to that listener, checked in the kernel before routing.
+The embedding adapter owns validated iframe WS/SSE messages and connection cleanup.
+Streaming endpoint Fetch runs a generic Node HTTP relay module in an owned guest
+process; output bytes stream through the execution channel, abort kills the relay
+and closes its real guest connection. Uploads are buffered. Legacy SW HTTP remains
+buffered. An optional `stdioCredits` SAB counts each channel's unread bytes,
+including messages in transit. Worker output splits at 64 KiB and fails with
+`stdio-overflow` above 1 MiB outstanding per channel; the kernel kills that subtree
+and reports `proc-output-error`. Pulling/cancelling a host channel returns credit.
+This is fail-on-overflow, not blocking Writable backpressure; guest child capture
+and child-to-parent stream queues retain their existing separate semantics.
+ChildProcess stdout/stderr preserve raw Uint8Array messages when a byte-mode
+parent inherits its mode into children. Converting those messages with String
+would corrupt bytes into comma-separated decimal text before stream decoding.
+
+SDK `BootOptions.onLog` subscribes before service-worker registration and kernel
+boot, retaining early OPFS ownership/persistence failures for embedders. It stays
+subscribed for the instance lifetime and uses the existing log message channel.
+
+Guest process.getBuiltinModule resolves through the same eager/lazy builtin
+registry as require. The browser's network Worker constructor is hidden from guest
+globals; guest threads use node:worker_threads and its kernel-owned lifecycle.
+This prevents libraries from trying to load guest file:// paths as browser URLs.
+
+## Local warning and inherited-input continuation
+
+`process.emitWarning` defers warning events onto nextTick, preserves Error metadata
+and writes diagnostics to stderr. Node's real EventEmitter listener-limit warning
+now reports instead of throwing a missing-method error. CPU metrics stay absent.
+Inherited child stdin forwards the existing byte relay and removes its listeners
+on child exit; no new syscall or worker role is needed. This is a forwarding
+approximation, not POSIX shared-descriptor arbitration between competing readers.
+The interactive shell forwards foreground bytes unchanged (apart from its existing
+Ctrl+C interrupt interception). Rewriting CR to LF turned Return into newline in
+real TUI keymaps. The inherited-input probe launches through the interactive shell
+and checks CR preservation as well as UTF-8 and forwarding cleanup.
+
+## Local stream consumers continuation
+
+`node/lib/stream/consumers.js` supplies Node v24.18.0's collection algorithms via
+the builtin loader. Binary collection uses the worker's actual Blob, exposed by
+internal/blob; UTF-8 text uses streaming TextDecoder. The independent guest probe
+checks split code points, incomplete sequences, binary bytes, web streams, JSON
+and stream errors. No new host service, worker role or syscall is involved.
+
+VM Script/run/compileFunction evaluation rewrites dynamic imports through the
+existing guest __ocImport resolver. This prevents evaluated `import('node:...')`
+from escaping to browser network module loading. Ordinary script completion is
+preserved. Existing VM sandbox limitations and module-hook limitations remain.
+
+## Local explicit WASM FFI continuation
+
+`bun:ffi.vivariProfile(enabled)` enables/reset aggregate timing counters;
+`vivariStats()` reads pin count/bytes, linear-memory capacity, synchronization
+bytes/time and per-symbol call/native time. Profiling is off by default and records
+no argument/buffer contents. Timings are inclusive across reentrant callbacks;
+sync byte counters are bytes visited, not hardware memory-bandwidth measurements.
+
+`runtime/loopback-fetch.js` routes HTTP loopback URLs through the existing guest
+Node HTTP/TCP cross-process byte relay instead of the browser host's network.
+Response bodies remain streaming (SSE included), with ReadableStream pull/cancel
+and AbortSignal propagated to Node request/response destruction. Request bodies
+are buffered. Redirect responses work with `redirect: manual`; automatic redirects
+explicitly reject. External URLs retain host fetch, and host.vivari.internal is
+rewritten only after guest-loopback selection. There is no host service substitution.
+
+The explicit `bun` module now aliases the existing Bun shim namespace, matching
+its supported URL/hash/file/etc. methods. Merely importing it does not install
+the Bun global or fabricate a Bun process version. Both node:ffi and bun:ffi
+remain backed by the same generic per-process WASM owner.
+
+`runtime/builtins/ffi.js` owns synchronous `.ffi.json` loading over guest fs,
+WASI reactor initialization, typed WASM signature checking, scalar conversion,
+wasm32 offsets, same-thread callback table trampolines and buffer synchronization.
+The bun:ffi and experimental node:ffi facades share one open library per process;
+runtime identity is unchanged. No native ELF/shared-library loader is provided.
+
+Artifacts opt into `vivari-wasm32-flat-v1`, name a relative `.wasm`, export memory
+and ffi_alloc(u32)->ptr / ffi_free(ptr,u32), and optionally import env's indirect
+table with a manifest tableInitial. Pointer values are actual offsets, not JS
+addresses. Pointer-bearing structs must already match wasm32 layout. The runtime
+does not guess pointer fields from arbitrary bytes or recognize application symbols.
+
+Pinned backing buffers preserve overlapping typed-array aliasing and are copied
+in/out at every call and callback boundary. Native-owned mirrors track a baseline
+and write back only JS-changed bytes; this preserves native allocator side effects
+between symbol calls. A mirror baseline costs one extra copy of its byte range.
+This does not establish whether a raw native allocation remains live: consumers
+must not access a mirror after freeing its native owner. All memory views are reacquired
+after growth. A 64 MiB process pin budget and library.close bound retention.
+toArrayBuffer uses synchronized mirrors for stable native allocations; identical
+ranges reuse the same buffer, overlapping distinct ranges reject. These are not
+arbitrary zero-copy external ArrayBuffers. Native allocations exposed this way
+must stay alive until library.close. Shared memory, concurrent/async callbacks,
+N-API, variadics, arbitrary native pointers and unknown signatures reject.
+
+## Local WASI reactor output continuation
+
+WASI `fd_pwrite` now writes regular-file iovecs at an explicit safe-integer
+offset without advancing sequential position. Standard streams return ESPIPE,
+allowing Zig/libc writers to fall back to fd_write; unknown descriptors return
+EBADF. Reactor loading already uses standard WebAssembly + WASI.initialize.
+OpenTUI's wasm32 build/ABI adapter lives in the enclosing POC, not in the runtime.
+
+## Local terminal geometry and foreground continuation
+
+SDK spawn accepts `terminal: {cols, rows}`; `VivariProcess.resize()` validates
+1..65535 integer dimensions and posts `proc-resize` after `proc-started` (retaining
+the newest pre-start size). The kernel owns a geometry object inherited by child
+processes, sends `terminal-event` updates to attached descendants, and supplies
+current dimensions to newly spawned workers. Worker entries retain these events
+until boot control is ready. Guest loop delivery updates stdout AND stderr before
+emitting their real `resize` events, then process `SIGWINCH`; duplicate sizes are
+silent. Geometry membership is a shell subtree, not POSIX foreground groups.
+It does not change legacy isTTY detection or the separate `tty.WriteStream` stub.
+
+`OP_KILL` supports catchable SIGINT via a queued worker event. Unhandled SIGINT
+exits 130; a handler can keep running. SIGTERM/SIGKILL and SDK Stop remain forced
+subtree teardown, including a worker blocked on synchronous code. Other signal
+names reject ENOTSUP. Cooperative delivery cannot interrupt a busy JS/WASM loop;
+use Stop for forced cleanup. Shell Ctrl+C targets current pipeline stages; batch
+shell wrappers forward SIGINT and stdin to their current child. Background pipes
+stay open but receive no terminal input until `fg` selects their wrapper. No
+SIGTTIN, suspension, process groups, controlling terminal, cooked mode or PTY.
+
+## Local shell running-job slice
+
+The POC retains xterm and independent SDK shell ownership. The guest shell accepts
+one pipeline followed by `&`, runs it under a child `sh -c`, and tracks at most 32
+jobs. `jobs` lists/reaps completed jobs; `kill %N` terminates a job subtree;
+`fg %N` waits for a running job and makes Ctrl+C target it. Background stdin is
+held open until fg selects the job. `exit` exits the shell and kernel finalization kills
+its descendants. Compound background lists and suspension/resume are unsupported;
+`bg` errors explicitly. This is not POSIX process-group/terminal job control.
+SIGSTOP/SIGCONT reject explicitly; suspend/resume remains unsupported.
+The SDK merged-output ReadableStream is bounded to 1 Mi characters; overflow
+errors its consumer and kills the owning subtree. This bounds the SDK queue,
+not the browser MessagePort queue; a worker-side credit protocol remains future work.
+
+## Local OpenCode import checkpoint
+
+`node:sea` reports the actual non-single-executable process mode (`isSea() ===
+false`); asset calls throw ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION. This permits
+ordinary Node-mode feature detection; native PTY and libc FFI remain unsupported.
+The enclosing POC packages the pinned SDK on the host and executes it in browser
+workers; packaging is not a native backend substitution.
+
+## Local SQLite compatibility experiment
+
+The FS worker initializes pinned `@sqlite.org/sqlite-wasm@3.49.1-build1`
+(SQLite 3.49.1) before announcing readiness. `node:sqlite` and `bun:sqlite`
+share that engine through OP_SQLITE. Requests/results travel via temporary VFS
+files and the existing chunked fd operations; the SAB carries only their path.
+Each database pathname permits one live connection. FS client unregistration
+closes its databases (rolling back uncommitted work). Symlink/hardlink aliases,
+ATTACH, native extensions, and excluded/volatile persistent paths are rejected.
+Memory journal mode is reported honestly; this is not a WAL implementation.
+
+Committed snapshots are exported without closing the SQLite connection, written
+to the VFS in one whole-file mutation, and acknowledged only after OPFS flush.
+The mirror replaces files/manifests using atomic writable-stream close and
+surfaces queued write errors. A failed persistence operation poisons its SQLite
+connection and quarantines its pathname until kernel restart: failed VFS bytes
+must not be promoted by closing/reopening a connection. An unacknowledged write
+may recover as old or new (file close can precede manifest failure). Other raw
+filesystem writes to an open database are outside this
+ownership model. These changes are under qualification in the enclosing POC;
+they do not establish a working OpenCode host.
+
+A lifetime Web Lock leases the OPFS mirror to one kernel per browser origin.
+Another kernel cannot obtain persistent SQLite connections; worker termination
+releases the lease. This is separate from the still-unimplemented libc flock API.
+
+The enclosing POC runs identical SQL/ownership API fixtures through headless
+Node worker_threads and the built browser runtime. A shared engine contract also
+runs with real Rust VFS/SQLite WASM in Bun and a browser worker. Browser-only
+storage tests use an isolated `rootName` (and corresponding Web Lock), real OPFS
+exclusive-handle errors, and termination while actual replacement streams are
+unclosed. These are not quota-exhaustion or power-loss simulations.
+
 This document explains how Vivari works end to end: the core constraint it
 solves, the worker topology, the syscall protocol, the filesystem, the process
 model, the Node runtime, networking, native code, and the build. It is the
@@ -429,6 +631,15 @@ UTF-8; binary (images/fonts/wasm) crosses base64 with `bodyEncoding: 'base64'`
 (the SW decodes it). Large bodies are chunked (§4.1).
 
 ### 8.3 Browser preview (Service Worker)
+
+Workspace embedders can supply `__vv_host_paths` (JSON segment-prefix array) on
+the preview URL, alongside `__vv_listener`. Root-absolute matching requests use
+native `fetch(event.request)` before guest routing, preserving cookies, bodies,
+headers, status, streams and cancellation. WS/EventSource shims likewise retain
+native host connections for matching paths. Default is no host routes; no app or
+OpenCode path is built in. This is routing, not authorization. Server policy owns
+access. Relative `api/...` resolves below `/preview/<port>/`, not `/api/...`;
+routers must retain reserved query identity (including after SW revival).
 
 `packages/studio/public/sw.js` is a preview proxy scoped to the whole origin (needs
 `Service-Worker-Allowed: /`). It intercepts the preview iframe's `fetch`

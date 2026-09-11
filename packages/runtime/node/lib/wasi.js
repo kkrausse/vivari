@@ -36,6 +36,7 @@ export default function (exports, require, module, process) {
   const ENOTDIR = 54;
   const ENOTEMPTY = 55;
   const EPERM = 63;
+  const ESPIPE = 70;
   const ENOTCAPABLE = 76;
 
   const FILETYPE_UNKNOWN = 0;
@@ -371,6 +372,33 @@ export default function (exports, require, module, process) {
         return ESUCCESS;
       }
 
+      // Positional writes must not advance the descriptor's sequential offset.
+      // In particular, libc/Zig probe stdout with pwrite and fall back on ESPIPE.
+      function fd_pwrite(fd, iovs, iovsLen, offset, nwrittenPtr) {
+        const rec = getFd(fd);
+        if (!rec) return EBADF;
+        if (rec.type === "stdin" || rec.type === "stdout" || rec.type === "stderr") return ESPIPE;
+        if (rec.type !== "file") return EBADF;
+        const pos = Number(offset);
+        if (!Number.isSafeInteger(pos) || pos < 0) return EINVAL;
+        const dv = view(), mem = bytes();
+        if (!Number.isInteger(iovsLen) || iovsLen < 0 || iovs < 0 ||
+            iovs + iovsLen * 8 > mem.length || nwrittenPtr < 0 || nwrittenPtr + 4 > mem.length) return EINVAL;
+        let written = 0;
+        try {
+          for (let i = 0; i < iovsLen; i++) {
+            const p = dv.getUint32(iovs + i * 8, true);
+            const len = dv.getUint32(iovs + i * 8 + 4, true);
+            if (p + len > mem.length || !Number.isSafeInteger(pos + written + len)) return EINVAL;
+            const n = fs.writeSync(rec.hostFd, Buffer.from(mem.slice(p, p + len)), 0, len, pos + written);
+            written += n;
+            if (n < len) break;
+          }
+        } catch (err) { return errnoFor(err); }
+        dv.setUint32(nwrittenPtr, written, true);
+        return ESUCCESS;
+      }
+
       function fd_seek(fd, offset, whence, newOffsetPtr) {
         const rec = getFd(fd);
         if (!rec || rec.type !== "file") return EBADF;
@@ -698,7 +726,7 @@ export default function (exports, require, module, process) {
         fd_filestat_set_size: notsup,
         fd_filestat_set_times: ok,
         fd_pread: notsup,
-        fd_pwrite: notsup,
+        fd_pwrite,
         fd_renumber: notsup,
         path_open,
         path_filestat_get,

@@ -48,6 +48,7 @@ try {
 }
 
 let control = null;
+const terminalPending = [];
 
 parentPort.on("message", (msg) => {
   if (msg.type === "init") {
@@ -60,6 +61,7 @@ parentPort.on("message", (msg) => {
       send: (type, extra) => parentPort.postMessage({ type, ...extra }),
       onReady: (c) => {
         control = c;
+        for (const m of terminalPending.splice(0)) control.dispatchTerminal(m);
       },
       codec: makeZStream,
       cryptoCodec,
@@ -94,6 +96,10 @@ parentPort.on("message", (msg) => {
     control && control.dispatchPipe(msg);
   // An interactive stdin chunk for this process (host terminal / parent -> child).
   else if (msg.type === "stdin") control && control.dispatchStdin(msg);
+  else if (msg.type === "terminal-event") {
+    if (control) control.dispatchTerminal(msg);
+    else terminalPending.push(msg);
+  }
   // An async fetch result relayed by the kernel (parallel downloads).
   else if (msg.type === "fetch-done") control && control.dispatchFetch(msg);
 });

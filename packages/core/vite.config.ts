@@ -33,6 +33,8 @@ function bundleServiceWorker(): Plugin {
 // consumer's bundler resolves the workers/wasm relative to node_modules, no
 // separate asset-hosting step required.
 export default defineConfig({
+  // Nested worker URLs must resolve beside their parent under any asset mount.
+  base: "./",
   plugins: [bundleServiceWorker()],
   build: {
     target: "es2022",

@@ -894,8 +894,11 @@ function baseProcEnv(dir) {
 // hooks (below), so this coexists with the terminal (termByPid) routing.
 const execByPid = new Map(); // pid -> execId
 const pidByExec = new Map(); // execId -> pid
+const listenerIds = new Map();
+let listenerSeq = 0;
+const listenerGeneration = crypto.randomUUID();
 
-async function spawnProcess(execId, command, args, cwd, extraEnv) {
+async function spawnProcess(execId, command, args, cwd, extraEnv, terminal, stdioCredits) {
   if (!kernel) {
     post("proc-exit", { execId, code: 127, error: "kernel not ready" });
     return;
@@ -909,7 +912,7 @@ async function spawnProcess(execId, command, args, cwd, extraEnv) {
   // which the kernel gates itself), so the gate has to run here.
   await kernel.ensureCommandLoaded(command);
   if (!kernel) return;
-  const pid = kernel.launch(command, Array.isArray(args) ? args : [], { cwd: dir, env });
+  const pid = kernel.launch(command, Array.isArray(args) ? args : [], { cwd: dir, env, terminal, stdioCredits });
   if (pid < 0) {
     post("proc-exit", { execId, code: 127, error: command + ": not found" });
     return;
@@ -1120,7 +1123,7 @@ async function boot() {
     fsWorker.onmessage = (event) => {
       if (event.data.type === "ready") resolve();
       // The FS worker logs OPFS restore status; relay it to the host UI.
-      else if (event.data.type === "log") post("log", event.data);
+      else if (["log", "workspace-persistence", "vv-reply", "vv-fs-changed"].includes(event.data.type)) post(event.data.type, event.data);
       // Structured boot progress (OPFS restore done/total) — relay for the UI.
       else if (event.data.type === "boot-progress")
         post("boot-progress", {
@@ -1308,6 +1311,7 @@ async function boot() {
       } else post("stderr", { chunk });
     },
   });
+  kernel.onStdioOverflow = (pid, channel) => post("proc-output-error", { execId: execByPid.get(pid), channel });
   kernel.onProcExit = (pid, res) => {
     // Persistent dependency cache (P1): a package-manager install that just
     // finished cleanly is our signal to snapshot node_modules. Keying off the
@@ -1322,7 +1326,7 @@ async function boot() {
     if (eid !== undefined) {
       execByPid.delete(pid);
       pidByExec.delete(eid);
-      post("proc-exit", { execId: eid, code: res.code });
+      post("proc-exit", { execId: eid, code: res.code, signal: res.signal });
       return;
     }
     const tid = termByPid.get(pid);
@@ -1365,9 +1369,17 @@ async function boot() {
       post("exit", { pid, code: res.code });
     }
   };
+  kernel.onCloseServer = (port, pid) => {
+    const listenerId = listenerIds.get(port);
+    listenerIds.delete(port);
+    listening.delete(port);
+    post("unlisten", { port, pid, listenerId });
+  };
   kernel.onListen = (port, pid) => {
     listening.add(port);
-    post("listen", { port, pid });
+    const listenerId = listenerGeneration + ":" + (++listenerSeq);
+    listenerIds.set(port, listenerId);
+    post("listen", { port, pid, listenerId });
     // Created/opened project attribution FIRST (by pid chain), so a project's
     // dev server is matched to *its* run-shell regardless of the port it picked
     // (and never confused with a hard-coded DEMO that shares e.g. 5173/3000).
@@ -1910,6 +1922,22 @@ async function runSearch(m) {
 self.onmessage = async (event) => {
   const m = event.data;
 
+  if (m.type === "workspace-flush" || m.type === "workspace-persistence" || m.type === "workspace-read") {
+    fsWorkerRef.postMessage(m);
+    return;
+  }
+  if (m.type === "workspace-listeners") {
+    post("vv-reply", { reqId: m.reqId, ok: true, listeners: [...listenerIds].map(([port, listenerId]) => ({ port, listenerId })) });
+    return;
+  }
+  if (m.type === "workspace-write") {
+    try {
+      await kernel.writeFilesBatch([{ path: m.path, bytes: m.bytes }]);
+      post("vv-reply", { reqId: m.reqId, ok: true });
+    } catch (error) { post("vv-reply", { reqId: m.reqId, ok: false, error: String(error) }); }
+    return;
+  }
+
   if (m.type === "init") {
     // Default on: only an explicit `compress: false` (BootOptions.compress) disables it.
     vfsCompression = m.compress !== false;
@@ -1985,7 +2013,11 @@ self.onmessage = async (event) => {
   // Run one command directly (no wrapping shell) and stream its output/exit back
   // by `execId`. See spawnProcess + the execByPid routing in boot().
   if (m.type === "proc-spawn") {
-    void spawnProcess(m.execId, m.command, m.args, m.cwd, m.env).catch((err) =>
+    if (m.listenerId && listenerIds.get(m.port) !== m.listenerId) {
+      post("proc-exit", { execId: m.execId, code: 127, error: "listener closed" });
+      return;
+    }
+    void spawnProcess(m.execId, m.command, m.args, m.cwd, m.env, m.terminal, m.stdioCredits).catch((err) =>
       post("proc-exit", { execId: m.execId, code: 127, error: (err && err.message) || String(err) }),
     );
     return;
@@ -1994,6 +2026,11 @@ self.onmessage = async (event) => {
   if (m.type === "proc-input") {
     const pid = pidByExec.get(m.execId);
     if (pid != null && kernel) kernel.sendStdin(pid, m.chunk == null ? null : m.chunk);
+    return;
+  }
+  if (m.type === "proc-resize") {
+    const pid = pidByExec.get(m.execId);
+    if (pid != null && kernel) kernel.resizeTerminal(pid, m);
     return;
   }
   // Kill a spawned process (its exit is still reported via onProcExit → proc-exit).
@@ -2068,7 +2105,7 @@ self.onmessage = async (event) => {
     try {
       if (!kernel.exists(m.path)) { post("vv-reply", { reqId: m.reqId, ok: true, exists: false, isDir: false }); return; }
       const st = kernel.stat(m.path);
-      post("vv-reply", { reqId: m.reqId, ok: true, exists: true, isDir: st.kind === "dir" });
+      post("vv-reply", { reqId: m.reqId, ok: true, exists: true, isDir: st.kind === "dir", size: st.size });
     } catch {
       post("vv-reply", { reqId: m.reqId, ok: true, exists: false, isDir: false });
     }
@@ -2301,6 +2338,10 @@ self.onmessage = async (event) => {
   // port was transferred to us, so we answer it directly.
   if (m.type === "vv-http") {
     const port = event.ports[0];
+    if (m.req.listenerId && listenerIds.get(m.req.port) !== m.req.listenerId) {
+      port.postMessage({ status: 410, headers: {}, body: "workspace listener closed\n" });
+      return;
+    }
     if (!kernel) {
       port.postMessage({ status: 503, headers: {}, body: "kernel not ready\n" });
       return;

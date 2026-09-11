@@ -267,7 +267,7 @@ if (evalCode != null) {
   // pipes (|), redirects (< > >> 2> 2>> 2>&1), builtins (cd, pwd, export, :,
   // true, false), everything else spawned as a child process inheriting cwd/env.
   // Quotes ("' ) are stripped by the lexer. Not supported: $VAR expansion, globs,
-  // background (&), subshells.
+  // subshell syntax. A trailing & supports one background pipeline (see below).
   sh: `
 const fs = require('fs');
 const cp = require('child_process');
@@ -304,6 +304,7 @@ function lex(s) {
     if (c === '<') { flush(); op('<'); continue; }
     if (c === '|') { flush(); if (s[i + 1] === '|') { op('||'); i += 1; } else op('|'); continue; }
     if (c === '&' && s[i + 1] === '&') { flush(); op('&&'); i += 1; continue; }
+    if (c === '&') { flush(); op('&'); continue; }
     if (c === ';') { flush(); op(';'); continue; }
     cur += c; has = true;
   }
@@ -347,6 +348,34 @@ function parse(toks) {
 // tears the entire \`a | b | c\` down, not just the last stage.
 let currentChild = null;
 let currentKill = null;
+const jobs = new Map();
+let nextJob = 1;
+
+// A background pipeline is owned by a child batch shell, so its whole subtree
+// has one kill target. This is running-job control, not POSIX process groups.
+function background(line) {
+  if (jobs.size >= 32) throw Error('sh: background job limit (32); use jobs to reap completed jobs');
+  const child = cp.spawn('sh', ['-c', line], { cwd: process.cwd(), env: process.env });
+  const id = nextJob++;
+  const job = { id, child, line, code: null, done: null };
+  jobs.set(id, job);
+  // Keep the pipe open, but only currentChild receives terminal input after fg.
+  child.stdout.on('data', d => process.stdout.write(d));
+  child.stderr.on('data', d => process.stderr.write(d));
+  job.done = new Promise(resolve => {
+    let settled = false;
+    const finish = code => {
+      if (settled) return;
+      settled = true; job.code = code;
+      if (currentChild === child) { currentChild = null; currentKill = null; }
+      resolve(code);
+    };
+    child.on('error', e => { process.stderr.write('sh: ' + e.message + '\\n'); finish(127); });
+    child.on('close', (code, signal) => finish(code == null ? (signal === 'SIGKILL' ? 137 : signal ? 143 : 0) : code));
+  });
+  process.stdout.write('[' + id + '] ' + child.pid + '\\n');
+  return 0;
+}
 
 // Interactive command history, shared between the line editor (up/down recall)
 // and the \`history\` builtin below. Populated by the REPL in interactive mode;
@@ -357,6 +386,25 @@ function runSimple(tokens) {
   if (!tokens.length) return Promise.resolve(0);
   const cmd = tokens[0];
   const args = tokens.slice(1);
+  if (cmd === 'exit') { process.exit(args.length ? Number(args[0]) || 0 : 0); }
+  if (cmd === 'jobs') {
+    for (const [id, job] of jobs) {
+      process.stdout.write('[' + id + '] ' + (job.code === null ? 'Running' : 'Done (' + job.code + ')') + ' ' + job.line + '\\n');
+      if (job.code !== null) jobs.delete(id);
+    }
+    return Promise.resolve(0);
+  }
+  if (cmd === 'bg') { process.stderr.write('sh: bg: suspension/resume is unsupported; use a trailing & to start a running job\\n'); return Promise.resolve(1); }
+  if (cmd === 'fg' || cmd === 'kill') {
+    const id = args[0] ? Number(args[0].replace(/^%/, '')) : Array.from(jobs.keys()).pop();
+    const job = jobs.get(id);
+    if (!job || job.code !== null) { process.stderr.write('sh: ' + cmd + ': no running job\\n'); return Promise.resolve(1); }
+    if (cmd === 'kill') { job.child.kill('SIGTERM'); return Promise.resolve(0); }
+    currentChild = job.child;
+    currentKill = sig => job.child.kill(sig);
+    process.stdout.write(job.line + '\\n');
+    return job.done.then(code => { jobs.delete(id); return code; });
+  }
   if (cmd === 'cd') {
     try { process.chdir(args[0] || '/'); return Promise.resolve(0); }
     catch (e) { process.stderr.write('cd: ' + (e.code || e.message) + '\\n'); return Promise.resolve(1); }
@@ -483,6 +531,13 @@ function runPipeline(stages) {
 async function runLine(line) {
   const toks = lex(line);
   if (!toks.length) return 0;
+  const amp = toks.findIndex(t => t.t === 'op' && t.v === '&');
+  if (amp !== -1) {
+    if (amp !== toks.length - 1 || amp === 0 || toks.some(t => t.t === 'op' && [';', '&&', '||'].includes(t.v))) {
+      throw Error('sh: supported background syntax is one pipeline followed by &');
+    }
+    return background(line.slice(0, line.lastIndexOf('&')).trim());
+  }
   let status = 0;
   for (const el of parse(toks)) {
     if (!el.stages.some((s) => s.argv.length || s.redirs.length)) continue;
@@ -497,6 +552,9 @@ async function runLine(line) {
 
 // Batch mode: \`sh script\` or \`sh -c "..."\`. Run each line, then exit.
 async function runBatch() {
+  process.on('SIGINT', () => { if (currentKill) currentKill('SIGINT'); else process.exit(130); });
+  process.stdin.on('data', d => { if (currentChild) currentChild.stdin.write(d); });
+  process.stdin.on('end', () => { if (currentChild) currentChild.stdin.end(); });
   let status = 0;
   for (const raw of script.split('\\n')) {
     const line = raw.replace(/#.*$/, '').trim();
@@ -537,7 +595,7 @@ function runInteractive() {
   const setLine = (s) => { line = s; pos = s.length; redraw(); };
 
   // ---- Tab completion -------------------------------------------------------
-  const BUILTINS = ['cd', 'pwd', 'export', 'history'];
+  const BUILTINS = ['cd', 'pwd', 'export', 'history', 'exit', 'jobs', 'fg', 'bg', 'kill'];
   // Scripting no-ops: still handled by runSimple / installed on /bin (used in
   // shell scripts and \`&&\`||\` chains), but hidden from Tab suggestions since
   // nobody completes them interactively and they only clutter the list.
@@ -665,10 +723,11 @@ function runInteractive() {
     const s = typeof buf === 'string' ? buf : buf.toString('utf8');
     // A foreground job owns stdin: Ctrl+C interrupts it (SIGINT to every stage of
     // a pipeline); otherwise pass keystrokes straight through to the first stage
-    // (Enter as newline), no line-edit/echo — the program drives the display.
+    // unchanged, no line-edit/echo — the program drives the display. In particular
+    // CR is Return, while LF may be Ctrl+J/newline in an application's keymap.
     if (currentChild) {
       if (s.indexOf('\\x03') !== -1) { if (currentKill) currentKill('SIGINT'); else { try { currentChild.kill('SIGINT'); } catch (e) {} } }
-      else { try { currentChild.stdin.write(s.replace(/\\r/g, '\\n')); } catch (e) {} }
+      else { try { currentChild.stdin.write(buf); } catch (e) {} }
       return;
     }
     for (let i = 0; i < s.length; i++) {

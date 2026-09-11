@@ -14,6 +14,9 @@ import { createWebSocket } from "./websocket.js";
 import { rewriteDynamicImportToGlobal } from "./esm.js";
 import { isEsbuildInprocActive, esbuildWasmBytes } from "./esbuild-inproc-patch.js";
 import { createBunRuntime } from "./builtins/bun.js";
+import { isGuestLoopback, loopbackFetch } from "./loopback-fetch.js";
+import { createSqlite } from "./builtins/sqlite.js";
+import { createSea } from "./builtins/sea.js";
 
 function createConsole(process, util) {
   const toOut = (...a) => process.stdout.write(util.format(...a) + "\n");
@@ -61,6 +64,7 @@ export function createRuntime({
   ppid = 0,
   argv = [],
   env = {},
+  terminal = null,
   cwd = "/",
   stdout = () => {},
   stderr = () => {},
@@ -289,6 +293,15 @@ export function createRuntime({
   const Buffer = bufferModule.Buffer;
   const path = nodeModules.require("path");
   const EventEmitter = nodeModules.require("events");
+  // Stdout/stderr need real resize listeners (their boot-time stream facade
+  // deliberately has no EventEmitter). Keep writes on the existing transport.
+  for (const stream of [process.stdout, process.stderr]) {
+    const events = new EventEmitter();
+    for (const name of ["on", "once", "addListener", "prependListener", "prependOnceListener", "removeListener", "off", "removeAllListeners", "emit", "listeners", "listenerCount", "setMaxListeners", "getMaxListeners"])
+      stream[name] = (...args) => { const result = events[name](...args); return result === events ? stream : result; };
+    if (terminal) { stream.columns = terminal.cols; stream.rows = terminal.rows; }
+    stream.getWindowSize = () => [stream.columns, stream.rows];
+  }
   const util = nodeModules.require("util");
   const fs = nodeModules.require("fs");
   const stream = nodeModules.require("stream");
@@ -495,7 +508,19 @@ export function createRuntime({
   // enqueues; drainStdin (a loop turn) pushes into the Readable so 'data' fires in
   // a controlled turn. A null chunk is stdin EOF (Ctrl+D / closed terminal).
   const stdinQueue = [];
+  const terminalQueue = [];
   drainStdin = () => {
+    while (terminalQueue.length) {
+      const event = terminalQueue.shift();
+      if (event.signal) {
+        if (!process.emit(event.signal)) process.exit(130);
+      } else {
+        const changed = [process.stdout, process.stderr].filter(s => s.columns !== event.cols || s.rows !== event.rows);
+        for (const s of changed) { s.columns = event.cols; s.rows = event.rows; }
+        for (const s of changed) s.emit("resize");
+        if (changed.length) process.emit("SIGWINCH");
+      }
+    }
     while (stdinQueue.length) {
       const chunk = stdinQueue.shift();
       if (chunk === null) stdin.push(null);
@@ -974,6 +999,7 @@ export function createRuntime({
     const hostFetch = globalThis.fetch;
     if (!hostFetch.__ocHostWrapped) {
       const wrappedFetch = function (input, init) {
+        if (isGuestLoopback(input)) return trackHost(loopbackFetch(vvRootRequire, input, init));
         return trackHost(hostFetch.call(this, rewriteHostAlias(input), init));
       };
       wrappedFetch.__ocHostWrapped = true;
@@ -1121,6 +1147,9 @@ export function createRuntime({
     diagnostics_channel: diagnosticsChannel,
     cluster,
   };
+  const sqlite = createSqlite({ fs, path, process, syscalls, Buffer });
+  builtins.sqlite = sqlite.node;
+  builtins["node:sea"] = createSea();
 
   // Node exposes the posix/win32 path flavors as their own subpath builtins
   // (`require('node:path/posix')`). We're posix, so `path` already IS posix;
@@ -1230,6 +1259,13 @@ export function createRuntime({
   // lets `const { Module } = require('module')`, `require('module') === Module`,
   // and monkey-patching `Module.prototype`/`_load`/`_extensions` all behave.
   const Module = moduleSystem.Module;
+  process.getBuiltinModule = id => {
+    if (typeof id !== 'string') throw new TypeError('id must be a string');
+    return Module.isBuiltin(id) ? vvRootRequire(id) : undefined;
+  };
+  // Browser worker constructors cannot load guest file:// modules. Guest threads
+  // are exposed through node:worker_threads, never the host network constructor.
+  globalThis.Worker = undefined;
   // `builtinModules` must be the public list only (no `node:`-prefixed dupes and
   // no internal names). Snapshot before the node: aliases are added below.
   Module.builtinModules = Object.keys(builtins).filter((n) => !n.startsWith("node:") && !n.startsWith("_"));
@@ -1272,6 +1308,7 @@ export function createRuntime({
   // `typeof Bun !== 'undefined'`. See packages/runtime/builtins/bun.js.
   const bunRuntime = createBunRuntime({ process, Buffer, require: vvRootRequire });
   for (const [name, mod] of Object.entries(bunRuntime.modules)) builtins[name] = mod;
+  builtins["bun:sqlite"] = sqlite.bun;
   globalThis.__ocInstallBun = () => {
     globalThis.Bun = bunRuntime.Bun;
     return bunRuntime.Bun;
@@ -1329,6 +1366,7 @@ export function createRuntime({
     /** External delivery from the kernel: an interactive stdin chunk for THIS
      * process ({type:'stdin', chunk} - chunk null = EOF). Feeds process.stdin. */
     dispatchStdin: (msg) => dispatchStdin(msg),
+    dispatchTerminal: (msg) => { terminalQueue.push(msg); loop.wakeNet(); },
     /**
      * Run an entry file like `node <entry>`, then drive the event loop until it
      * is quiescent (no pending timers/immediates/nextTicks and no open servers).

@@ -8,6 +8,9 @@ export interface KernelMessage {
 
 /** Options for {@link Vivari.boot}. */
 export interface BootOptions {
+  /** Kernel logs, including early persistence/startup failures. Subscribed until
+   * teardown; callbacks should be cheap and must not throw. */
+  onLog?: (line: string) => void;
   /**
    * Whole-file lazy compression in the VFS. On by default — it cuts the file
    * system worker's memory footprint by ~70 % for a large `node_modules`. Set to
@@ -56,6 +59,8 @@ export interface DirEnt {
 
 /** Options for {@link Vivari.spawn}. */
 export interface SpawnOptions {
+  /** Terminal geometry, inherited by descendants; not a PTY allocation. */
+  terminal?: { cols: number; rows: number };
   /** Working directory for the process. Defaults to the VM root (or active project). */
   cwd?: string;
   /** Extra environment variables, merged over Vivari's package-manager-friendly defaults. */

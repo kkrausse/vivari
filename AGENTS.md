@@ -1,5 +1,56 @@
 # AGENTS.md
 
+Keep the core library Vite base relative (`./`): consumers can mount the runtime
+under `/runtime/`; root-absolute nested worker URLs hang FS boot in browsers.
+
+Embedders needing startup logs must use BootOptions.onLog; subscribing after
+await Vivari.boot misses early OPFS persistence failures. Keep callbacks cheap.
+
+Inherited child stdin uses the existing byte relay; remove forwarding listeners
+on exit without removing preexisting listeners. process.emitWarning must emit real
+deferred warnings, not silence EventEmitter's listener-limit diagnostics.
+
+`node:stream/consumers` uses Node's collection algorithms over guest async streams
+and the worker's actual Blob/TextDecoder. Qualify split UTF-8, binary bytes, JSON,
+WHATWG streams and propagated errors with the enclosing stream-consumers probe.
+VM evaluated imports must use the guest loader: vm.js shares the existing dynamic
+import rewrite with other eval paths. Keep ordinary script completion values intact
+(the rewrite returns null when no import is present). See the vm-import probe.
+Local OpenCode continuation: `runtime/builtins/sea.js` implements non-SEA behavior
+only. Native PTY/FFI remain unsupported. `builtins/ffi.js` provides a bounded
+WASM-backed bun:ffi/node:ffi subset, selected by explicit .ffi.json artifacts.
+Keep consumer symbols/layout conversions out of this substrate; validate with
+the enclosing POC's ffi-contract.cjs in workers and browsers. Buffers are pinned
+until library.close (64 MiB process budget); external mirrors require stable
+native allocations until close. Overlapping external ArrayBuffers reject.
+Opt-in `bun:ffi.vivariProfile()` counters contain only timings/counts; use
+`vivariStats()` for pin/linear-memory growth, not worker `performance.memory`
+(unavailable in Chrome workers). Do not log FFI arguments or buffer contents.
+Never count an exit-zero import as host
+success: the enclosing POC requires explicit create/session checkpoint output.
+Native-owned FFI mirrors synchronize only JS-changed bytes back to WASM. Never
+blindly copy an unchanged mirror in: even ffi_alloc may have changed native data
+between symbol calls. Baselines refresh on copy-out. The independent allocator-
+epoch regression in ffi-contract.cjs guards this; it is not native liveness tracking.
+`require('bun')` exports the same supported shim methods as the lazy Bun global.
+Importing the module does not install the global or change process.versions.
+HTTP fetch to localhost/127.0.0.1/::1 uses the guest Node HTTP byte relay, including
+streaming response bodies and aborts. Host-machine HTTP requires the existing
+host.vivari.internal alias. Keep this routing before alias rewriting; otherwise
+the alias accidentally loops back into the guest. Automatic loopback redirects
+currently reject explicitly (manual is supported), and uploads are buffered.
+
+Local SQLite experiment: `kernel-host/sqlite-server.js` owns the shared WASM
+engine; `runtime/builtins/sqlite.js` provides the synchronous facades. Keep the
+OP_SQLITE ABI in sync with fs-client and fs-server. SQLite initialization must
+finish before FS-worker readiness, never inside synchronous module resolution.
+Validate database behavior in the enclosing POC's `probes/runtime/sqlite-api.cjs`
+and in the browser, including reload and ownership release. Never call a
+best-effort VFS write a durable SQLite commit.
+After a persistence failure, quarantine the database path until kernel restart;
+closing/reopening must not promote unacknowledged VFS bytes. Run the enclosing
+POC's shared contract, headless worker API suite, and browser OPFS qualification.
+
 Guidance for AI agents (and humans) working in this repo. Read this first, then
 read [`ARCHITECTURE.md`](./ARCHITECTURE.md) before touching the runtime, the
 protocol, or networking. [`roadmap.md`](./roadmap.md) is the chronological log of

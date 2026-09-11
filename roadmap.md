@@ -1,5 +1,104 @@
 # Vivari — Roadmap
 
+## Browser distribution relocation
+
+Real-browser workspace qualification found nested worker URLs rooted at `/assets/`
+while the consumer serves the distribution under `/runtime/`. Set the library
+build base to `./`; generated workers now resolve their siblings relative to
+themselves, including SQLite's optional OPFS helper. No emitted worker rewriting.
+
+## Optional workspace host-backend routing
+
+Added caller-declared root-absolute segment prefixes carried in preview URL query.
+Matching iframe requests bypass buffered guest HTTP via native Fetch; host WS/SSE
+stay native too. The application owns server authorization. No default backend
+paths or OpenCode route exceptions; relative/router URL limitations remain explicit.
+
+## Workspace application integration: child output bytes
+
+Prepared Vite and the matched OpenCode V2 CLI now run through the enclosing
+public API's real-worker harness. OpenCode's wrapper exposed child stdout/stderr
+stringification: inherited VV_BYTE_STDIO produces Uint8Array messages, whose
+String conversion emitted CSV numbers. Preserve bytes in ChildProcess Readables;
+the public headless contract covers all 256 values over both child channels.
+
+## Early SDK boot diagnostics
+
+`BootOptions.onLog` subscribes before kernel boot, exposing the concrete OPFS
+owner/persistence failure instead of only a later service timeout. Consumers keep
+their own bounded transcript; no protocol or persistence policy changes.
+
+First matched TUI submission reached the real parser worker and exposed a leaked
+host Worker constructor. Hide it and expose getBuiltinModule through the existing
+guest registry so portable libraries select real guest worker_threads. Package the
+pinned parser worker explicitly; no fake highlighting response is provided.
+
+## Local V2 input and warnings
+
+Actual V2 TUI interaction exposed missing process.emitWarning (EventEmitter limit)
+and inherit-mode input forwarding. Implement deferred warning events/diagnostics
+and child byte forwarding with exit cleanup. Independent worker probes assert
+warning metadata, UTF-8 input and cleanup against preexisting listener counts.
+Return did not submit because the interactive shell rewrote CR to LF. Foreground
+input now preserves bytes, with a shell-to-child CR regression probe.
+
+## Local coherent V2 CLI continuation
+
+The source-matched V2 CLI reaches missing node:stream/consumers. Add Node's
+collection algorithms and expose the real worker Blob through internal/blob.
+VM Script dynamic imports also escaped to browser module loading; use the existing
+guest import rewriter and assert namespaces, completion values and missing imports.
+The enclosing independent guest probe covers observable decoding/collection and
+error propagation; this is reusable Node compatibility, not application logic.
+
+## Local WASM FFI: native-owned mirror writeback
+
+Profiling continuation: opt-in aggregate FFI counters distinguish synchronization
+from native symbol time and expose retained pin bytes versus linear-memory
+capacity. The enclosing demo compares paced typing, sustained input and idle
+cycles. The 64 MiB budget and pointer-lifetime contract are unchanged.
+
+The real source-built OpenCode server listens in a browser worker, but its TUI
+fetches localhost through host fetch and therefore cannot reach that guest server.
+Add general HTTP loopback fetch over the existing Node HTTP byte relay: buffered
+request bodies, streaming responses, abort/cancel and explicit redirect limits.
+An independent two-process HTTP fixture checks binary POST, headers/status, an
+unending SSE stream's first chunk, cancellation, and manual/rejected redirects.
+
+Actual OpenCode source packaging also reached `import ... from 'bun'`. Expose
+the existing supported Bun namespace as that builtin, without installing the
+global during Node startup. Independent URL/hash namespace assertions cover it.
+
+The compiled OpenTUI boundary continuation adds no renderer symbols to Vivari.
+One general correctness fix: unchanged external mirrors must not overwrite
+native mutations made by ffi_alloc between symbol calls. Copy only JS deltas,
+refreshing baselines on native copy-out. The independent C fixture exposes an
+allocator epoch and verifies it survives creation of another pinned JS buffer.
+This remains a bounded synchronized-mirror API, not a zero-copy ArrayBuffer or
+native allocation liveness detector. Build-time record adaptation belongs to
+the consuming compiled library in the enclosing POC.
+
+## Local OpenCode continuation: non-SEA detection
+
+Host-packaged official SDK execution reached missing `node:sea`. Add the actual
+non-SEA behavior: false detection and explicit asset errors. The larger native
+PTY/FFI gaps remain. The enclosing POC now exercises the actual OpenCode Node
+and Bun SQLite Effect adapters, including transactions, rollback, int64, BLOBs,
+array rows, and scoped close/reopen. Full host creation is not yet qualified.
+
+## Local experiment: SQLite WASM facades (under qualification)
+
+The enclosing browser-container POC adds shared SQLite 3.49.1 execution and
+acknowledged OPFS snapshot persistence. The official SQLite WASM distribution
+exposes exact int64 binds and transaction-state inspection that sql.js 1.13.0's
+prebuilt API lacks. This retains the SQLite engine version while changing its
+JS/WASM distribution. The enclosing POC now covers committed multi-statement
+prefixes, triggers, savepoints, int64/nonfinite numeric transport, actual OPFS
+write failures and interrupted replacements. Failed persistence quarantines a
+database path until kernel restart. Shared headless/browser fixtures close the
+API testing gap; browser-specific persistence gates remain mandatory. Actual SDK
+migrations, quota exhaustion and machine/power-loss qualification remain open.
+
 Built on the principle **de-risk the hardest part first**: prove the riskiest
 primitive (synchronous cross-thread access to a shared kernel) before expanding.
 
@@ -3042,3 +3141,45 @@ previewed live in the iframe — with the Path A hand-written builtins deleted.
 | `Node.js Worker PID n` | Process = 1 worker + Node shim |
 | `[worker n]` | Nested `worker_threads` — real (#16 stage 2b) |
 | `sw.js` | Service Worker preview |
+# Local POC continuation: xterm-first shell jobs (2026-09-06)
+
+Added a bounded running-job table for a single background pipeline (`&`), `jobs`,
+`fg` (wait/interrupt only; stdin stays EOF), `kill %N`, and shell `exit`. Ownership
+uses existing recursive kernel finalization; no process groups or suspension.
+The enclosing POC qualifies concurrent shell sessions and Vite/HMR in-browser.
+# Local POC terminal continuation — 2026-09-06
+
+Added inherited spawn geometry and live SDK resize to stdout/stderr with real
+resize listeners and SIGWINCH notification. Queued delivery runs inside the guest
+loop; worker startup retains early terminal events. Background stdin remains open
+and fg selects its input route; batch wrappers forward input and SIGINT. SIGINT
+is catchable (default exit 130); other than forced SIGTERM/SIGKILL, unsupported
+signals reject ENOTSUP. Forced Stop handles busy workers and subtree cleanup.
+No PTYs/process groups/suspension; geometry follows attached descendants rather
+than POSIX foreground groups. The enclosing POC shell-headless contract exercises
+dimensions, notifications, input ownership, catchable interrupts and isolation.
+# Local WASI renderer continuation (2026-09-06)
+
+OpenTUI WASI reactor compilation exposed fd_pwrite returning ENOSYS for stdout.
+Implement positional file writes and ESPIPE for streams so standard Zig writers
+can fall back to fd_write. No native FFI identity spoofing or app-specific loader.
+# Local continuation: explicit WASM FFI substrate (2026-09-06)
+
+Added a reusable bounded bun:ffi/node:ffi facade over explicitly selected WASI
+reactors. Engine-checked scalar signatures, pinned/mirrored buffers, wasm32
+pointer structs supplied by consumers, memory growth and reentrant same-thread
+callbacks are covered by an independently compiled C reactor in the enclosing
+POC. Native FFI and automatic native64-to-wasm32 struct conversion remain outside
+the contract. This follows the runtime-first direction rather than replacing
+OpenTUI's TypeScript RenderLib; actual renderer acceptance remains a separate gate.
+# Local workspace-v1 API continuation — September 2026
+
+Added acknowledged FS flush/state and binary batch-write RPCs, host-visible guest
+mutations, opt-in byte stdio, forced-exit metadata and listener close/incarnation
+events. The enclosing workspace-api retains the storage supervisor across runtime
+stop, and supplies a generic per-request guest HTTP stream adapter. This is a real
+worker backend, not a host filesystem copy. Browser acceptance and remaining
+limitations are recorded in the enclosing workspace-api README/handoff.
+SDK stdio now optionally counts in-transit bytes over an 8-byte shared credit
+buffer, splits output chunks and terminates on bounded overflow; plain terminal
+and headless legacy channels keep their existing behavior.

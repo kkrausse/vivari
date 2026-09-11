@@ -19,6 +19,8 @@ export class VivariProcess {
   private readonly bridge: KernelBridge;
   private readonly execId: number;
   private killed = false;
+  private started = false;
+  private terminal?: { cols: number; rows: number };
 
   constructor(
     bridge: KernelBridge,
@@ -29,6 +31,14 @@ export class VivariProcess {
   ) {
     this.bridge = bridge;
     this.execId = execId;
+    if (options.terminal) this.validateTerminal(options.terminal);
+    this.terminal = options.terminal;
+    const offStarted = bridge.on("proc-started", (m: KernelMessage) => {
+      if (m.execId !== execId) return;
+      this.started = true;
+      offStarted();
+      if (this.terminal) this.resize(this.terminal);
+    });
 
     let outController!: ReadableStreamDefaultController<string>;
     let resolveExit!: (code: number) => void;
@@ -37,6 +47,13 @@ export class VivariProcess {
     const offOut = bridge.on("proc-out", (m: KernelMessage) => {
       if (m.execId !== execId) return;
       try {
+        // There is no worker-side credit protocol yet. Bound the SDK queue and
+        // fail/terminate explicitly rather than silently dropping terminal bytes.
+        if ((m.chunk as string).length > (outController.desiredSize ?? 0)) {
+          outController.error(new Error("Vivari process output backlog exceeded 1 Mi characters"));
+          this.kill();
+          return;
+        }
         outController.enqueue(m.chunk as string);
       } catch {
         /* consumer cancelled the stream */
@@ -46,6 +63,8 @@ export class VivariProcess {
       if (m.execId !== execId) return;
       offOut();
       offExit();
+      offStarted();
+      this.killed = true;
       try {
         outController.close();
       } catch {
@@ -59,7 +78,7 @@ export class VivariProcess {
         outController = controller;
       },
       cancel: () => this.kill(),
-    });
+    }, { highWaterMark: 1 << 20, size: chunk => chunk?.length ?? 0 });
 
     this.input = new WritableStream<string>({
       write: (chunk) => {
@@ -78,10 +97,24 @@ export class VivariProcess {
       args,
       cwd: options.cwd,
       env: options.env,
+      terminal: options.terminal,
     });
   }
 
-  /** Terminate the process (SIGTERM). Its `exit` still resolves. */
+  private validateTerminal(size: { cols: number; rows: number }): void {
+    if (![size.cols, size.rows].every(n => Number.isInteger(n) && n > 0 && n <= 65535))
+      throw new RangeError("Terminal cols/rows must be integers from 1 to 65535");
+  }
+
+  /** Update the owned terminal and its descendants asynchronously. */
+  resize(size: { cols: number; rows: number }): void {
+    this.validateTerminal(size);
+    if (this.killed) return;
+    this.terminal = { ...size };
+    if (this.started) this.bridge.post("proc-resize", { execId: this.execId, ...size });
+  }
+
+  /** Force termination and subtree cleanup. Its `exit` still resolves. */
   kill(): void {
     if (this.killed) return;
     this.killed = true;

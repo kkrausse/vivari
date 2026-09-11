@@ -167,6 +167,11 @@ export const OP_PIPE_LISTEN = 31;
 export const OP_PIPE_CONNECT = 32;
 export const OP_PIPE_CLOSE_SERVER = 33;
 
+// SQLite request/response bodies use temporary VFS files (normal chunked fd IO),
+// so neither large binds nor result sets overflow the SAB. field0=request path;
+// response is written to path+'.out'. ACK is deferred until durable commit.
+export const OP_SQLITE = 34;
+
 // request flags (bitmask)
 export const FLAG_RECURSIVE = 1; // mkdir -p
 
@@ -180,6 +185,7 @@ export function isFsOpcode(op) {
     (op >= OP_READ_FILE && op <= OP_READLINK) ||
     (op >= OP_OPEN && op <= OP_FTRUNCATE) ||
     op === OP_LINK ||
+    op === OP_SQLITE ||
     op === OP_WATCH ||
     op === OP_UNWATCH
   );

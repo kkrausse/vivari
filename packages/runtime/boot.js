@@ -38,6 +38,26 @@ export function bootProcess({
   // transferred port is an IPC channel (process.send / 'message'), not parentPort.
   const isFork = !!spec.isFork;
   const isThread = !!spec.isThread && !isFork;
+  // Optional SDK credits include bytes still in MessagePort transit. Overflow
+  // fails the execution rather than queueing unbounded worker output. A single
+  // chunk is split so even one large write cannot bypass the transport bound.
+  const credits = spec.stdioCredits ? new Int32Array(spec.stdioCredits) : null;
+  let outputFailed = false;
+  const output = (type, chunk, channel) => {
+    if (!credits) { send(type, { chunk }); return; }
+    if (outputFailed) return;
+    const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk;
+    for (let offset = 0; offset < bytes.length; offset += 65536) {
+      const part = bytes.slice(offset, offset + 65536);
+      if (Atomics.add(credits, channel, part.length) + part.length > 1048576) {
+        Atomics.sub(credits, channel, part.length);
+        outputFailed = true;
+        send("stdio-overflow", { channel });
+        throw new Error("SDK unread output exceeded 1048576 bytes");
+      }
+      send(type, { chunk: part });
+    }
+  };
   const runtime = createRuntime({
     ctrl,
     data,
@@ -52,9 +72,10 @@ export function bootProcess({
     // process.argv becomes ['node', programPath, ...args]
     argv: [spec.programPath, ...(spec.args || [])],
     env: spec.env || {},
+    terminal: spec.terminal,
     cwd: spec.cwd || "/",
-    stdout: (chunk) => send("stdout", { chunk }),
-    stderr: (chunk) => send("stderr", { chunk }),
+    stdout: (chunk) => output("stdout", chunk, 0),
+    stderr: (chunk) => output("stderr", chunk, 1),
     postRaw,
     // fork mode: the transferred port is the process IPC channel, not parentPort.
     ipcPort: isFork ? threadPort : null,
@@ -91,6 +112,7 @@ export function bootProcess({
       dispatchSse: runtime.dispatchSse,
       dispatchPipe: runtime.dispatchPipe,
       dispatchStdin: runtime.dispatchStdin,
+      dispatchTerminal: runtime.dispatchTerminal,
       dispatchFetch: runtime.dispatchFetch,
       memStats: runtime.memStats,
     });

@@ -6,6 +6,7 @@ export default function (exports, require, module, process, internalBinding, pri
   "use strict";
 
   module.exports = {
+    Blob: globalThis.Blob,
     createBlobFromFilePath() {
       throw new Error("Vivari: fs.openAsBlob() is not supported yet");
     },
