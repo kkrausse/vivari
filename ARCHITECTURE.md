@@ -1,5 +1,14 @@
 # Vivari — Architecture
 
+## Maintained fork source and integration
+
+The browser runtime extensions now live as ordinary commits in `kkrausse/vivari`
+on `browser-runtime`, preserving upstream history. `FORK.md` describes the source
+and build boundary. The former integration patch is historical provenance, not
+an active build input. Generated WASM and worker distributions remain disposable
+build outputs. SQLite WASM is an explicit pinned dependency of this checkout.
+This source migration does not change the runtime/HTTP/storage semantics below.
+
 ## Workspace API continuation (workspace-v1)
 
 The core library build uses a relative Vite base so nested worker and SQLite

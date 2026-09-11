@@ -25,6 +25,7 @@
     "build:studio": "cd packages/studio && bun run build",
     "preview:studio": "cd packages/studio && bun run preview",
     "verify": "node scripts/verify-node.mjs",
+    "verify:contracts": "node scripts/verify-runtime-contracts.mjs",
     "smoke": "node scripts/smoke-sdk.mjs",
     "build:example": "npm run build --workspace @vivari/example-basic",
     "spikes": "node scripts/run-spikes.mjs",
@@ -45,5 +46,7 @@
     "build:sdk": "npm run build:core && npm run build:react",
     "typecheck:sdk": "npm run typecheck --workspace @vivari/core && npm run typecheck --workspace @vivari/react"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@sqlite.org/sqlite-wasm": "3.49.1-build1"
+  }
 }

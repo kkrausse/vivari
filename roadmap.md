@@ -3183,3 +3183,13 @@ limitations are recorded in the enclosing workspace-api README/handoff.
 SDK stdio now optionally counts in-transit bytes over an 8-byte shared credit
 buffer, splits output chunks and terminates on bounded overflow; plain terminal
 and headless legacy channels keep their existing behavior.
+# September 10, 2026 — Direct fork development
+
+Imported the exact 34-file browser runtime delta against upstream
+`2629c71097238400c45aefa213ef61df4794c2b7` and preserved its Bun lockfile as ordinary
+fork history. The integration's cumulative `0001-sqlite.patch` is retired after
+fork build qualification. Source edits can now be rebuilt without exporting and
+reapplying a patch. Declared the SQLite WASM dependency explicitly so the checkout
+does not rely on ancestor `node_modules`. Moved stream-consumers, VM imports,
+warnings, and non-SEA guest fixtures into fork-owned runtime contracts, with a
+standalone headless worker runner. See `FORK.md` for workflow and provenance.

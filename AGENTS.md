@@ -1,5 +1,19 @@
 # AGENTS.md
 
+## Maintained browser-runtime fork
+
+This checkout is the editable source of truth: `kkrausse/vivari`, branch
+`browser-runtime`, based on upstream `2629c71097238400c45aefa213ef61df4794c2b7`.
+Commit source changes normally. Do not regenerate a cumulative patch or edit
+generated worker bundles. The user has authorized committing this migration.
+
+Read `FORK.md` for development, integration, provenance, and verification.
+Generic compatibility fixtures belong in `scripts/fixtures/runtime-contracts/`;
+run `node scripts/verify-runtime-contracts.mjs [contract-name]` after building WASM.
+OpenCode packaging/browser acceptance remain in the separate integration repo.
+Keep the fork independently installable: runtime build dependencies must be
+declared here rather than resolved accidentally from a parent checkout.
+
 Keep the core library Vite base relative (`./`): consumers can mount the runtime
 under `/runtime/`; root-absolute nested worker URLs hang FS boot in browsers.
 
@@ -249,8 +263,9 @@ README.md · roadmap.md · research.md · ARCHITECTURE.md · AGENTS.md
    - `research.md` — when you gather new background research.
    If a change touches several areas, update several docs. Out-of-date docs are
    worse than none, because agents trust them.
-8. **Only commit when asked.** And never commit build artifacts (`pkg/`,
-   `pkg-node/` are gitignored) or secrets.
+8. **Commit completed changes unless instructed otherwise.** Scope commits to
+   your own files. Never commit build artifacts (`pkg/`, `pkg-node/` are
+   gitignored) or secrets.
 
 ---
 

@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "vivari",
+      "devDependencies": {
+        "@sqlite.org/sqlite-wasm": "3.49.1-build1",
+      },
     },
     "examples/basic": {
       "name": "@vivari/example-basic",
@@ -83,6 +86,8 @@
     "@rolldown/binding-win32-x64-msvc": ["@rolldown/binding-win32-x64-msvc@1.1.5", "", { "os": "win32", "cpu": "x64" }, "sha512-tTZuDBPw85tEN5PQi1pnEBzDy0Z49HtScLAbD5t6hyeU92A95pRWaSMw1GZZi/RwgSgUIl0xrSlXIT/9QzvYSA=="],
 
     "@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.1", "", {}, "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw=="],
+
+    "@sqlite.org/sqlite-wasm": ["@sqlite.org/sqlite-wasm@3.49.1-build1", "", { "bin": { "sqlite-wasm": "bin/index.js" } }, "sha512-81N0Al5QSmMjxo9CMPWSc9gMJm+c/dbToPSPeXA//8V9B3WbO758bPh7ODrBN7rY3yhr/ZwXHP4QgpHWLa7AdA=="],
 
     "@tybys/wasm-util": ["@tybys/wasm-util@0.10.3", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg=="],
 

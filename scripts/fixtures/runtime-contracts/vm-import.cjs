@@ -1,0 +1,20 @@
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+(async()=>{
+  const options = {importModuleDynamically:vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER};
+  assert.equal(process.getBuiltinModule('node:worker_threads'),require('node:worker_threads'));
+  assert.equal(process.getBuiltinModule('not-a-builtin'),undefined);
+  assert.equal(globalThis.Worker,undefined);
+  const worker=new (process.getBuiltinModule('worker_threads').Worker)(`require('worker_threads').parentPort.postMessage('guest-thread')`,{eval:true});
+  assert.equal(await new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject)}),'guest-thread');
+  await worker.terminate();
+  const ns = await new vm.Script('import("node:module")',options).runInThisContext();
+  assert.equal(ns.default,require('node:module'));
+  assert.equal(typeof ns.createRequire,'function');
+  assert.equal((await vm.runInThisContext('import("node:path")',options)).default,require('node:path'));
+  assert.equal((await vm.compileFunction('return import("node:path")',[],options)()).default,require('node:path'));
+  assert.equal((await vm.runInNewContext('import("node:path")',{},options)).default,require('node:path'));
+  assert.equal(vm.runInThisContext('const local = 2; local + 3'),5);
+  await assert.rejects(new vm.Script('import("missing-vm-fixture")',options).runInThisContext(),/Cannot find module/);
+  console.log('VM_IMPORT_PASS guest-namespace/script/function/sandbox/completion/rejection');
+})().catch(e=>{console.error(e);process.exitCode=1});
