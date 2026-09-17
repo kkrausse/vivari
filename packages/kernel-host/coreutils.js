@@ -621,7 +621,8 @@ if (evalCode != null) {
   // nothing. runMain also hands back the module's top-level-await promise, which is
   // what lets the runtime notice a program that ends while still suspended instead
   // of reporting success.
-  Module.runMain(abs);
+  const result = Module.runMain(abs);
+  if (result && typeof result.then === 'function') module.evaluating = result;
 }
 ` + REPL_KIT_SRC + WATCH_KIT_SRC,
 

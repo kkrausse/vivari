@@ -136,6 +136,7 @@ export class Kernel {
     // ---- virtual network (brick 5) ----
     this.listeners = new Map(); // port -> pid of the server process
     this.pendingHttp = new Map(); // reqId -> { resolve, pid }
+    this.httpStreams = new Map(); // request id -> fixed listener owner + channel
     // One cookie jar per listening port: on a real machine localhost:3000 and
     // localhost:5173 are separate origins with separate jars, and sharing one
     // would leak an API's session into a frontend.
@@ -591,6 +592,10 @@ export class Kernel {
         syscall: () => this.serviceSyscall(pid),
         stdout: (m) => this.onOutput(pid, m.chunk, false),
         stderr: (m) => this.onOutput(pid, m.chunk, true),
+        "stdio-overflow": (m) => {
+          if (this.onStdioOverflow) this.onStdioOverflow(pid, m.channel);
+          this.finalize(pid, 143, "SIGTERM");
+        },
         exit: (m) => this.finalize(pid, m.code | 0),
         // The worker died rather than exited: it threw at boot, its module graph
         // failed to load, or the browser reclaimed it (a V8 OOM kill). The
@@ -621,6 +626,7 @@ export class Kernel {
         // A process relays an SSE stream chunk outward (in-VM server -> browser
         // preview EventSource) for a tunneled connection.
         "sse-out": (m) => this.handleSseOut(pid, m),
+        "http-stream-out": (m) => this.handleHttpStreamOut(pid, m),
         // Cross-process pipe (UNIX socket) traffic this process produced: bytes /
         // half-close / teardown for a connection, relayed to the peer process.
         "pipe-data": (m) => this.handlePipeRelay(pid, m),
@@ -711,7 +717,7 @@ export class Kernel {
     // `unobservable` in core/terminal-feedback.js.
     proc.everOutput = true;
     if (proc.capture) {
-      (isErr ? proc.errBuf : proc.outBuf).push(chunk);
+      (isErr ? proc.errBuf : proc.outBuf).push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
       return;
     }
     if (proc.stream) {
@@ -932,6 +938,9 @@ export class Kernel {
       /* ignore */
     }
     this.procs.delete(pid);
+    for (const [id, stream] of this.httpStreams) {
+      if (stream.pid === pid) this.closeHttpStream(id, "Server process exited");
+    }
     // Breakpoint debugger: drop the target's debug channel + state and tell the UI
     // it went away (so the studio can detach the frontend).
     if (this.debugSabs.has(pid)) {
@@ -1033,7 +1042,7 @@ export class Kernel {
       // breakpoint debugger's skip-list (`sh`/`npm`/…): without it a debug-mode
       // shell has command=undefined and is wrongly treated as a debug target, so
       // auto-attach lands on the shell instead of the `node` the user runs.
-      { command, programPath, args, cwd, env: opts.env || {} },
+      { command, programPath, args, cwd, env: opts.env || {}, terminal: opts.terminal, stdioCredits: opts.stdioCredits },
       { capture: !!opts.capture },
     );
     // Captured here too. `start` grew this first, and leaving `launch` without it gave
@@ -1235,6 +1244,9 @@ export class Kernel {
         return;
       }
       this.listeners.set(port, proc.pid);
+      for (const [id, stream] of this.httpStreams) {
+        if (stream.port === port) this.closeHttpStream(id, "HTTP listener replaced");
+      }
       this.respondOk(proc, EMPTY);
       if (this.onListen) this.onListen(port, proc.pid);
       return;
@@ -1246,6 +1258,49 @@ export class Kernel {
       if (this.onClose) this.onClose(port, proc.pid);
     }
     this.respondOk(proc, EMPTY);
+  }
+
+  // Listener close stops admission; accepted responses keep their fixed owner
+  // and drain until completion, cancellation, replacement, or process exit.
+  openHttpStream(port, metadata, channel) {
+    const pid = this.listeners.get(port);
+    if (pid == null || !this.procs.has(pid) || this.httpStreams.size >= 128 || JSON.stringify(metadata).length > 65536) {
+      channel.postMessage({ op: "error", error: "HTTP listener unavailable or bridge capacity exceeded" });
+      channel.close();
+      return;
+    }
+    const id = this.nextReqId++;
+    this.httpStreams.set(id, { pid, port, channel });
+    channel.onmessage = ({ data }) => {
+      if (!this.httpStreams.has(id)) return;
+      if (!["upload", "upload-end", "pull", "cancel"].includes(data?.op)) {
+        this.closeHttpStream(id, "Invalid HTTP stream message"); return;
+      }
+      if (data.op === "cancel") { this.closeHttpStream(id, "HTTP request cancelled"); return; }
+      if (!this.postToProc(pid, { ...data, type: "http-stream", id })) this.closeHttpStream(id, "Server process exited");
+    };
+    channel.onmessageerror = () => this.closeHttpStream(id, "HTTP channel failed");
+    channel.start();
+    if (!this.postToProc(pid, { ...metadata, type: "http-stream", op: "open", id, port })) this.closeHttpStream(id, "Server process exited");
+  }
+
+  closeHttpStream(id, error) {
+    const stream = this.httpStreams.get(id);
+    if (!stream) return;
+    this.httpStreams.delete(id);
+    this.postToProc(stream.pid, { type: "http-stream", id, op: "cancel" });
+    stream.channel.postMessage({ op: "error", error });
+    stream.channel.close();
+  }
+
+  handleHttpStreamOut(pid, message) {
+    const stream = this.httpStreams.get(message.id);
+    if (!stream || stream.pid !== pid) return;
+    stream.channel.postMessage(message);
+    if (message.op === "end" || message.op === "error") {
+      this.httpStreams.delete(message.id);
+      stream.channel.close();
+    }
   }
 
   // ---- cross-process pipe (UNIX socket) servicing --------------------------

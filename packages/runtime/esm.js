@@ -370,8 +370,7 @@ function scanExportEdits(src, isFrom) {
       }
       if (src[r] === "{") {
         // export { ... }  (local, or re-export handled elsewhere)
-        let j = r + 1;
-        while (j < n && src[j] !== "}") j++;
+        const j = skipBalanced(src, r + 1) - 1;
         let k = j + 1;
         while (k < n && /\s/.test(src[k])) k++;
         if (src.startsWith("from", k)) {
@@ -492,7 +491,7 @@ export function transpileEsm(source, filename) {
     return null; // let the CJS path try (and surface a real error)
   }
   const [imports, exports, , hasModuleSyntax] = parsed;
-  if (!hasModuleSyntax) return null;
+  if (!hasModuleSyntax && !/\.(?:mjs|mts)$/.test(filename || "")) return null;
 
   const edits = [];
   const prelude = []; // import requires + import-derived bindings + re-export getters

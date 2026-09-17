@@ -596,9 +596,32 @@ export function createFsBinding({ sys: rawSys, process }) {
     },
     realpath(path, encoding, ...rest) {
       const req = findReq(rest);
-      // VFS paths are already absolute & normalized; symlink resolution for the
-      // default realpath is done by fs.js itself via lstat/readlink.
-      return dispatch(req, () => path);
+      return dispatch(req, () => {
+        const input = typeof path === "string" ? path : textDecoder.decode(path);
+        if (!input) throw vvError("ENOENT", "realpath", input);
+        const parts = R(input).split("/").slice(1), resolved = [];
+        let links = 0;
+        while (parts.length) {
+          const part = parts.shift();
+          if (!part || part === ".") continue;
+          if (part === "..") { resolved.pop(); continue; }
+          const current = "/" + [...resolved, part].join("/");
+          const info = sys.lstat(current);
+          if (info.kind === "symlink") {
+            if (++links > 40) throw vvError("ELOOP", "realpath", input);
+            const target = sys.readlink(current);
+            if (target.startsWith("/")) resolved.length = 0;
+            parts.unshift(...target.split("/"));
+          } else {
+            if (parts.length && info.kind !== "dir") throw vvError("ENOTDIR", "realpath", input);
+            resolved.push(part);
+          }
+        }
+        const canonical = "/" + resolved.join("/");
+        sys.lstat(canonical);
+        const bytes = globalThis.Buffer.from(canonical);
+        return encoding === "buffer" ? bytes : bytes.toString(encoding || "utf8");
+      });
     },
     copyFile(src, dest, mode, ...rest) {
       const req = findReq(rest);

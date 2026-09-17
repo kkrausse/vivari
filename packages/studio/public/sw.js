@@ -11,6 +11,24 @@
 
 const PREVIEW_MARKER = "/preview/";
 
+// Embedders choose host routing policy; transport only validates and carries it.
+function hostPathsFromUrl(url) {
+  try {
+    const paths = JSON.parse(new URL(url).searchParams.get("__vv_host_paths") || "[]");
+    return Array.isArray(paths) && paths.length <= 32 ? paths.filter(p => typeof p === "string" && /^\/[A-Za-z0-9_/-]+$/.test(p) && !p.includes("//") && !p.endsWith("/")) : [];
+  } catch { return []; }
+}
+function matchesHostPath(path, paths) { return paths.some(prefix => path === prefix || path.startsWith(prefix + "/")); }
+const HOST_ROUTING_SHIM = `(${function () {
+  const paths = hostPathsFromUrl(location.href);
+  const nativeWS = window.WebSocket, nativeSSE = window.EventSource;
+  window.__vvNativeRoute = function (kind, input, options) {
+    const url = new URL(input, location.href);
+    if (url.host !== location.host || !matchesHostPath(url.pathname, paths)) return null;
+    return kind === "ws" ? new nativeWS(input, options) : new nativeSSE(input, options);
+  };
+}})();`;
+
 // Mode C (wildcard per-port origin): when this SW is served on a preview host
 // like `<token>--<port>.<domain>` the target port is encoded in the HOSTNAME (one
 // origin per port), not in a `/preview/<port>/` PATH. An optional `-<tag>` may
@@ -504,6 +522,7 @@ window.addEventListener('pagehide', function(){
   for (var k in conns){ try { conns[k].close(1001, 'unload'); } catch(e){} }
 });
 function VVWebSocket(url, protocols){
+  var native = window.__vvNativeRoute && window.__vvNativeRoute('ws', url, protocols); if (native) return native;
   this.url = String(url); this.readyState = 0; this.protocol = ''; this.binaryType = 'blob';
   this._id = tok + '-' + (nextId++); this._l = { open:[], message:[], close:[], error:[] };
   conns[this._id] = this;
@@ -639,6 +658,7 @@ window.addEventListener('pagehide', function(){
   for (var k in conns){ try { conns[k].close(); } catch(e){} }
 });
 function VVEventSource(url, cfg){
+  var native = window.__vvNativeRoute && window.__vvNativeRoute('sse', url, cfg); if (native) return native;
   this.url = String(url); this.readyState = 0; this.withCredentials = !!(cfg && cfg.withCredentials);
   this.lastEventId = ''; this.onopen = null; this.onmessage = null; this.onerror = null;
   this._id = tok + '-' + (nextId++); this._l = {}; this._buf = '';
@@ -850,6 +870,7 @@ function injectWsShim(html, keepPrefix, devtools) {
   // doesn't host /vv-devtools/chobitsu.js gets clean previews (no per-page 404).
   const tag =
     flag +
+    "<script>" + hostPathsFromUrl.toString() + ";" + matchesHostPath.toString() + ";" + HOST_ROUTING_SHIM + "<\/script>" +
     "<script>" + NET_SHIM + "<\/script>" +
     "<script>" + TITLE_SHIM + "<\/script>" +
     "<script>" + WS_SHIM + "<\/script>" +
@@ -1090,6 +1111,7 @@ async function routeByClient(event, url) {
     if (event.request.mode === "navigate") return fetch(url.href, { credentials: "include" });
     return fetch(event.request);
   }
+  if (matchesHostPath(url.pathname, hostPathsFromUrl(clientUrl))) return fetch(event.request);
   return handlePreview(event, parseInt(m[1], 10), url.pathname + url.search);
 }
 
@@ -1149,6 +1171,7 @@ function previewConnectingHtml(port) {
   );
 }
 
+const workspaceListenersByClient = new Map();
 async function handlePreview(event, port, path, keepPrefix) {
   if (!Number.isInteger(port)) {
     return new Response("Bad preview URL\n", { status: 400 });
@@ -1208,7 +1231,21 @@ async function handlePreview(event, port, path, keepPrefix) {
     }
   }
 
-  const req = { port, method, url: path, headers, body };
+  const requestUrl = new URL(event.request.url);
+  let listenerId = requestUrl.searchParams.get("__vv_listener");
+  const clientId = event.clientId || event.resultingClientId;
+  if (!listenerId && clientId) {
+    listenerId = workspaceListenersByClient.get(clientId);
+    if (!listenerId) {
+      const client = await self.clients.get(clientId);
+      if (client) listenerId = new URL(client.url).searchParams.get("__vv_listener");
+    }
+  }
+  if (listenerId && event.resultingClientId) workspaceListenersByClient.set(event.resultingClientId, listenerId);
+  const guestUrl = new URL(path, self.location.origin);
+  guestUrl.searchParams.delete("__vv_listener");
+  guestUrl.searchParams.delete("__vv_host_paths");
+  const req = { port, method, url: guestUrl.pathname + guestUrl.search, headers, body, listenerId };
 
   const resp = await new Promise((resolve) => {
     const mc = new MessageChannel();

@@ -405,9 +405,9 @@ export function createChildProcess({ sys, process, Buffer, EventEmitter, Readabl
       const cp = registry.get(m.childPid);
       if (!cp) continue;
       if (m.type === "child-stdout") {
-        cp.stdout.push(m.chunk == null ? null : Buffer.from(String(m.chunk), "utf8"));
+        cp.stdout.push(m.chunk == null ? null : Buffer.from(m.chunk));
       } else if (m.type === "child-stderr") {
-        cp.stderr.push(m.chunk == null ? null : Buffer.from(String(m.chunk), "utf8"));
+        cp.stderr.push(m.chunk == null ? null : Buffer.from(m.chunk));
       } else if (m.type === "child-exit") {
         registry.delete(m.childPid);
         if (childLiveness.active > 0) childLiveness.active--;

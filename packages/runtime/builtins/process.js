@@ -18,6 +18,12 @@ export function createProcess({ pid = 1, ppid = 0, argv = [], env = {}, cwd = "/
   // so byte writes (e.g. Go's wasm_exec writing to fd 1) must be decoded, not
   // stringified. Honour a string encoding arg (Node's write(chunk, encoding)).
   const decodeChunk = (chunk, encoding) => {
+    if (env.VV_BYTE_STDIO === "1") {
+      if (typeof chunk === "string") return globalThis.Buffer.from(chunk, typeof encoding === "string" ? encoding : "utf8");
+      if (ArrayBuffer.isView(chunk)) return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength).slice();
+      if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk.slice(0));
+      throw new TypeError("stdio expects a string or byte buffer");
+    }
     if (typeof chunk === "string") return chunk;
     const enc = typeof encoding === "string" ? encoding : "utf8";
     const B = globalThis.Buffer;
@@ -260,6 +266,11 @@ export function createProcess({ pid = 1, ppid = 0, argv = [], env = {}, cwd = "/
     nextTick: (fn, ...args) => scheduleTick(fn, ...args),
     hrtime,
     umask: () => 0,
+    getuid: () => 0,
+    geteuid: () => 0,
+    getgid: () => 0,
+    getegid: () => 0,
+    getgroups: () => [0],
     uptime: () => (globalThis.performance?.now?.() ?? 0) / 1000,
     // No V8 heap introspection in a Wasm/Worker sandbox — return plausible,
     // stable numbers. Real tools only read these for reporting (e.g. yarn's

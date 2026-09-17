@@ -254,6 +254,25 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
     return { name, sub: rest.length ? "./" + rest.join("/") : "." };
   }
 
+  function resolveSelf(name, sub, fromDir) {
+    let cur = fromDir;
+    while (path.basename(cur) !== "node_modules") {
+      const pkg = readPkg(cur);
+      if (pkg) {
+        if (pkg.name !== name || pkg.exports == null) return null;
+        const resolved = resolveExports(cur, pkg.exports, sub);
+        if (resolved) return resolved;
+        const err = new Error(`Package subpath '${sub}' is not defined by exports in ${path.join(cur, "package.json")}`);
+        err.code = "ERR_PACKAGE_PATH_NOT_EXPORTED";
+        throw err;
+      }
+      const parent = path.dirname(cur);
+      if (parent === cur) break;
+      cur = parent;
+    }
+    return null;
+  }
+
   function loadAsDirectory(dir) {
     const pkg = readPkg(dir);
     if (pkg) {
@@ -386,7 +405,8 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
       resolved = tryExtensions(base) || loadAsDirectory(base);
     } else {
       const { name, sub } = splitBare(request);
-      for (const nm of nodeModulesPaths(fromDir)) {
+      resolved = resolveSelf(name, sub, fromDir);
+      for (const nm of resolved ? [] : nodeModulesPaths(fromDir)) {
         const pkgDir = path.join(nm, name);
         const pkg = readPkg(pkgDir);
         if (pkg && pkg.exports) {

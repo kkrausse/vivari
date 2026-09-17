@@ -21,6 +21,8 @@ import initKernel, { VirtualFileSystem } from "../../../vfs/pkg/vivari_vfs.js";
 import { FsServer } from "../../../kernel-host/fs-server.js";
 import { createOpfsPersistence } from "../../../kernel-host/opfs-persistence.js";
 import { createDepCache } from "../../../kernel-host/dep-cache.js";
+import { createSqliteServer } from "../../../kernel-host/sqlite-server.js";
+import { installTree } from "../../../kernel-host/install-tree.js";
 
 const post = (type, extra) => self.postMessage({ type, ...extra });
 
@@ -30,6 +32,7 @@ let depCache = null; // lockfile-keyed node_modules snapshot cache (P1)
 let accessRef = null; // the vfs-bound facade, shared by persistence + dep cache
 let compressionOn = false; // whole-file lazy compression gate (URL ?compress=1)
 const queue = []; // messages that arrive before the VFS finishes booting
+let persistenceState = { status: "opening" };
 
 // Apply the current compression gate to the VFS. Guarded so an older wasm build
 // without set_compression simply ignores the flag instead of throwing.
@@ -45,6 +48,32 @@ function applyCompression() {
 
 function handle(msg) {
   switch (msg.type) {
+    case "workspace-install-tree":
+      installTree(server, msg).then(
+        result => post("vv-reply", { reqId: msg.reqId, ok: true, ...result }),
+        error => post("vv-reply", { reqId: msg.reqId, ok: false, error: String(error?.message || error) }),
+      );
+      break;
+    case "workspace-read":
+      try { post("vv-reply", { reqId: msg.reqId, ok: true, bytes: server.vfs.read_file(msg.path) }); }
+      catch (error) { post("vv-reply", { reqId: msg.reqId, ok: false, error: String(error?.message || error) }); }
+      break;
+    case "workspace-flush":
+      (async () => {
+        try {
+          if (!server.persistence) throw new Error(persistenceState.error || "OPFS is unavailable");
+          await server.persistence.flush();
+          post("vv-reply", { reqId: msg.reqId, ok: true });
+        } catch (error) {
+          persistenceState = { status: "failed", error: String(error?.message || error) };
+          post("workspace-persistence", persistenceState);
+          post("vv-reply", { reqId: msg.reqId, ok: false, error: persistenceState.error });
+        }
+      })();
+      break;
+    case "workspace-persistence":
+      post("vv-reply", { reqId: msg.reqId, ok: true, persistence: persistenceState });
+      break;
     case "fs-register":
       server.register(msg.client, msg.sab, msg.port || null);
       break;
@@ -71,7 +100,7 @@ function handle(msg) {
       }
       break;
     case "fs-flush": // page is hiding — best-effort force the mirror to disk
-      if (server && server.persistence) server.persistence.flush();
+      if (server && server.persistence) server.persistence.flush().catch(error => post("log", { line: String(error) }));
       break;
     case "fs-mem": {
       // Diagnostic: report the VFS's in-RAM content footprint (see the studio's
@@ -210,11 +239,7 @@ function buildAccess(vfs) {
       }
     },
     writeFile(path, bytes) {
-      try {
-        vfs.write_file(path, bytes);
-      } catch {
-        /* parent missing / restore race — skip */
-      }
+      vfs.write_file(path, bytes);
     },
     symlink(target, path) {
       try {
@@ -359,6 +384,7 @@ async function createOpfsDepStorage() {
           post("log", { line: `  [opfs] restoring… ${done}/${total}`, cls: "muted" });
         }
       });
+      persistenceState = { status: "durable" };
       if (n > 0)
         post("log", {
           line: `  [opfs] restored ${n} entries from a previous session (${Date.now() - t0}ms)`,
@@ -367,6 +393,7 @@ async function createOpfsDepStorage() {
     }
   } catch (err) {
     post("log", { line: "  [opfs] persistence unavailable: " + (err?.message || err), cls: "muted" });
+    persistenceState = { status: "failed", error: String(err?.message || err) };
     persistence = null;
   }
 
@@ -385,6 +412,10 @@ async function createOpfsDepStorage() {
   }
 
   server = new FsServer(vfs, persistence);
+  server.sqlite = await createSqliteServer(vfs, persistence);
+  server.onMutation = (path) => post("vv-fs-changed", { path });
+  if (persistenceState.status === "opening") persistenceState = { status: "ephemeral", reason: "OPFS unavailable" };
+  post("workspace-persistence", persistenceState);
   // Tell the kernel when a fetched response body has been fully read, so it can
   // drop its reference and reclaim the scratch file. These bodies live in Wasm
   // memory that never shrinks, so holding them past their single read is a direct

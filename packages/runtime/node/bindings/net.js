@@ -175,7 +175,8 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
   const deliver = (handle) => {
     // Pump queued inbound chunks into the stream while it wants to read.
     while (handle.reading && handle._inbox.length && !handle._closed) {
-      const item = handle._inbox[0];
+      const queued = handle._inbox[0];
+      const item = queued?.bytes || queued;
       if (item === EOF) {
         handle._inbox.shift();
         streamBaseState[kReadBytesOrError] = UV_CODES.UV_EOF;
@@ -189,6 +190,7 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
       // onStreamRead builds new FastBuffer(arrayBuffer, offset, nread); it may
       // set handle.reading = false (backpressure) which stops this loop.
       if (handle.onread) handle.onread.call(handle, item.buffer);
+      queued?.consumed?.();
     }
   };
 
@@ -208,6 +210,35 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
   };
 
   const doWrite = (handle, req, bytes) => {
+    if (!handle._xproc) {
+      streamBaseState[kBytesWritten] = bytes.byteLength;
+      streamBaseState[kLastWriteWasAsync] = 1;
+      const peer = handle._peer;
+      if (handle._closed || !peer || peer._closed) return UV_CODES.UV_EPIPE;
+      let offset = 0, finished = false;
+      const finish = (status = 0) => {
+        if (finished) return;
+        finished = true;
+        handle._pendingWrite = null;
+        handle.writeQueueSize = 0;
+        nextTick(() => req.oncomplete(status, handle, req));
+      };
+      handle._pendingWrite = finish;
+      handle.writeQueueSize = bytes.byteLength;
+      const pump = () => {
+        if (finished) return;
+        if (handle._closed || peer._closed) { finish(UV_CODES.UV_EPIPE); return; }
+        if (offset === bytes.byteLength) { finish(); return; }
+        const chunk = new Uint8Array(bytes.subarray(offset, offset + 65536));
+        offset += chunk.byteLength;
+        enqueueToPeer(peer, { bytes: chunk, consumed() {
+          handle.writeQueueSize -= chunk.byteLength;
+          nextTick(pump);
+        } });
+      };
+      nextTick(pump);
+      return 0;
+    }
     // bytes: Uint8Array/Buffer view. Copy (caller may reuse it) and hand to peer.
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);
@@ -445,6 +476,9 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
     close(cb) {
       if (!this._closed) {
         this._closed = true;
+        this._pendingWrite?.(UV_CODES.UV_EPIPE);
+        this._peer?._pendingWrite?.(UV_CODES.UV_EPIPE);
+        this._inbox.length = 0;
         recount(this); // drop from liveness
         if (this.type === TCPConstants.SERVER) {
           listeners.delete(this._localPort);
@@ -706,6 +740,9 @@ export function createNetBindings({ process, liveness, syscalls, netServers, pip
     close(cb) {
       if (!this._closed) {
         this._closed = true;
+        this._pendingWrite?.(UV_CODES.UV_EPIPE);
+        this._peer?._pendingWrite?.(UV_CODES.UV_EPIPE);
+        this._inbox.length = 0;
         recount(this);
         if (this.type === PipeConstants.SERVER && this._pipePath != null) {
           if (pipeServers.get(this._pipePath) === this) pipeServers.delete(this._pipePath);

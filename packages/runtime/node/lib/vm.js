@@ -14,6 +14,8 @@
 //
 // Like the `tty`/`url` shims, this is intentional (browser reality), not a stub.
 
+import { rewriteDynamicImportToGlobal } from '../../esm.js';
+
 export default function (exports, require, module) {
   const { Buffer } = require("buffer");
 
@@ -52,7 +54,7 @@ export default function (exports, require, module) {
         return true;
       },
     });
-    const src = String(code);
+    const src = rewriteDynamicImportToGlobal(String(code)) ?? String(code);
     const filename = filenameOf(options);
     // Real vm returns the script's *completion value* (the value of a trailing
     // expression statement), which a `new Function` body can't yield for a
@@ -78,7 +80,7 @@ export default function (exports, require, module) {
   const indirectEval = eval;
 
   function runInThisContext(code, options) {
-    const src = `${String(code)}\n//# sourceURL=${filenameOf(options)}`;
+    const src = `${rewriteDynamicImportToGlobal(String(code)) ?? String(code)}\n//# sourceURL=${filenameOf(options)}`;
     return indirectEval(src);
   }
 
@@ -103,7 +105,7 @@ export default function (exports, require, module) {
   function compileFunction(code, params = [], options = {}) {
     const args = Array.isArray(params) ? params.map(String) : [];
     // eslint-disable-next-line no-new-func
-    return new Function(...args, `${String(code)}\n//# sourceURL=${filenameOf(options)}`);
+    return new Function(...args, `${rewriteDynamicImportToGlobal(String(code)) ?? String(code)}\n//# sourceURL=${filenameOf(options)}`);
   }
 
   class Script {

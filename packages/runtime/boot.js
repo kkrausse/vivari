@@ -45,6 +45,23 @@ export function bootProcess({
   // transferred port is an IPC channel (process.send / 'message'), not parentPort.
   const isFork = !!spec.isFork;
   const isThread = !!spec.isThread && !isFork;
+  const credits = spec.stdioCredits ? new Int32Array(spec.stdioCredits) : null;
+  let outputFailed = false;
+  const output = (type, chunk, channel) => {
+    if (!credits) { send(type, { chunk }); return; }
+    if (outputFailed) return;
+    const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk;
+    for (let offset = 0; offset < bytes.length; offset += 65536) {
+      const part = bytes.slice(offset, offset + 65536);
+      if (Atomics.add(credits, channel, part.length) + part.length > 1048576) {
+        Atomics.sub(credits, channel, part.length);
+        outputFailed = true;
+        send("stdio-overflow", { channel });
+        throw new Error("SDK unread output exceeded 1048576 bytes");
+      }
+      send(type, { chunk: part });
+    }
+  };
   const runtime = createRuntime({
     ctrl,
     data,
@@ -67,8 +84,8 @@ export function bootProcess({
     // the shell, for every stage of a pipeline and every `<` redirect — now says so, and
     // that answer wins; `!capture` stays the default for everyone who does not.
     tty: spec.tty === undefined ? !spec.capture : !!spec.tty,
-    stdout: (chunk) => send("stdout", { chunk }),
-    stderr: (chunk) => send("stderr", { chunk }),
+    stdout: (chunk) => output("stdout", chunk, 0),
+    stderr: (chunk) => output("stderr", chunk, 1),
     postRaw,
     // fork mode: the transferred port is the process IPC channel, not parentPort.
     ipcPort: isFork ? threadPort : null,
@@ -108,6 +125,7 @@ export function bootProcess({
       dispatchThread: runtime.dispatchThread,
       dispatchWs: runtime.dispatchWs,
       dispatchSse: runtime.dispatchSse,
+      dispatchHttpStream: runtime.dispatchHttpStream,
       dispatchPipe: runtime.dispatchPipe,
       dispatchStdin: runtime.dispatchStdin,
       dispatchSignal: runtime.dispatchSignal,

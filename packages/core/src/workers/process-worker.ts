@@ -181,6 +181,7 @@ self.onmessage = async (event) => {
   else if (type === "ws-open" || type === "ws-in" || type === "ws-close")
     onControl((c) => c.dispatchWs(event.data));
   // A browser preview SSE tunnel message relayed by the kernel.
+  else if (type === "http-stream") onControl((c) => c.dispatchHttpStream(event.data));
   else if (type === "sse-open" || type === "sse-close")
     onControl((c) => c.dispatchSse(event.data));
   // A cross-process pipe (UNIX socket) message relayed by the kernel.

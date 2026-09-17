@@ -1,0 +1,21 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const tmp = require('node:os').tmpdir();
+fs.mkdirSync(tmp, { recursive: true });
+const root = fs.mkdtempSync(path.join(tmp, 'fs-remove-'));
+const rm = (file, options) => new Promise((resolve, reject) => fs.rm(file, options, error => error ? reject(error) : resolve()));
+(async () => {
+  fs.mkdirSync(root + '/nested');
+  fs.writeFileSync(root + '/nested/bytes.txt', 'remove me');
+  fs.writeFileSync(root + '/keep.txt', 'keep me');
+  fs.symlinkSync(root + '/keep.txt', root + '/nested/link');
+  await rm(root + '/nested', { recursive: true });
+  assert.equal(fs.existsSync(root + '/nested'), false);
+  assert.equal(fs.readFileSync(root + '/keep.txt', 'utf8'), 'keep me');
+  await rm(root + '/missing', { force: true });
+  await assert.rejects(rm(root + '/missing', {}), { code: 'ENOENT' });
+  await rm(root, { recursive: true });
+  assert.equal(fs.existsSync(root), false);
+  console.log('FS_REMOVE_PASS');
+})().catch(error => { console.error(error.stack); process.exitCode = 1; });

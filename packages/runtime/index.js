@@ -15,6 +15,10 @@ import { createWebSocket } from "./websocket.js";
 import { rewriteDynamicImportToGlobal } from "./esm.js";
 import { isEsbuildInprocActive, esbuildWasmBytes } from "./esbuild-inproc-patch.js";
 import { createBunRuntime } from "./builtins/bun.js";
+import { createSqlite } from "./builtins/sqlite.js";
+import { createSea } from "./builtins/sea.js";
+import { createHttpStreamBridge } from "./http-stream.js";
+import { isGuestLoopback, loopbackFetch } from "./loopback-fetch.js";
 import {
   IPC_PATH_ENV,
   IPC_MODE_ENV,
@@ -191,6 +195,7 @@ export function createRuntime({
   // relay (a loopback GET holding an open text/event-stream response) keeps the loop
   // turning so it can pump chunks, like an open socket handle.
   const sseLiveness = { active: 0 };
+  const httpStreamLiveness = { active: 0 };
   // Liveness counter for interactive stdin: while a consumer is actively reading
   // process.stdin (flowing / has a 'data' listener), it refs the loop like an
   // open TTY handle so an idle REPL/shell waits for the next keystroke instead of
@@ -218,6 +223,8 @@ export function createRuntime({
   // Bridges one external request (Service Worker / kernel.handleHttpRequest) into
   // this process's real http server. Wired below once the real http module exists.
   let bridgeHttp = null;
+  const httpStreamQueue = [];
+  let streamHttp = null;
 
   // The process event loop (Phase 2 #5): real nextTick > microtask > timers >
   // immediate ordering, timers firing even while a server is idle. On a `net`
@@ -232,8 +239,10 @@ export function createRuntime({
       watchLiveness.active > 0 ||
       wsLiveness.active > 0 ||
       sseLiveness.active > 0 ||
+      httpStreamLiveness.active > 0 ||
       stdinLiveness.active > 0,
     doNet: () => {
+      while (httpStreamQueue.length && streamHttp) streamHttp(httpStreamQueue.shift());
       if (netServers.count === 0 || !bridgeHttp) return;
       for (;;) {
         const ev = syscalls.tryAccept();
@@ -295,6 +304,7 @@ export function createRuntime({
     watchLiveness.active === 0 &&
     wsLiveness.active === 0 &&
     sseLiveness.active === 0 &&
+    httpStreamLiveness.active === 0 &&
     stdinLiveness.active === 0;
 
   const announceParked = (parked) => announceAwaiting("work", parked && parkedAwaitingWork());
@@ -983,6 +993,7 @@ export function createRuntime({
     }
     return out;
   };
+  streamHttp = createHttpStreamBridge({ http, Buffer, send: postRaw, liveness: httpStreamLiveness });
   bridgeHttp = (ev) => {
     const { reqId, port, req } = ev;
     let done = false;
@@ -1397,6 +1408,8 @@ export function createRuntime({
     const hostFetch = globalThis.fetch;
     if (!hostFetch.__ocHostWrapped) {
       const wrappedFetch = function (input, init) {
+        if (isGuestLoopback(input, nodeModules.internalBinding("tcp_wrap").isLocalDestination))
+          return trackHost(loopbackFetch(vvRootRequire, input, init));
         return trackHost(
           hostFetch.call(this, rewriteHostAlias(input), init).catch((err) => {
             throw explainFetchFailure(input, err);
@@ -1693,6 +1706,11 @@ export function createRuntime({
     getEnabledCategories() { return undefined; },
   };
 
+  // Both public SQLite facades share the FS-worker owner. Never instantiate the
+  // upstream per-process SQLite engine over the same workspace database files.
+  const sqlite = createSqlite({ fs, path, process, syscalls, Buffer });
+  builtins.sqlite = sqlite.node;
+  builtins["node:sea"] = createSea();
   const moduleSystem = createModuleSystem({ fs, path, builtins, process, globals, nodeModules });
 
   // `node --check` lives in the /bin/node.js shim, which is guest source and so cannot
@@ -1802,6 +1820,10 @@ export function createRuntime({
   // lets `const { Module } = require('module')`, `require('module') === Module`,
   // and monkey-patching `Module.prototype`/`_load`/`_extensions` all behave.
   const Module = moduleSystem.Module;
+  process.getBuiltinModule = id => {
+    if (typeof id !== "string") throw new TypeError("id must be a string");
+    return Module.isBuiltin(id) ? vvRootRequire(id) : undefined;
+  };
   Module.Module = Module;
   Module.createRequire = Module.createRequire || ((from) => moduleSystem.makeRequire(path.dirname(typeof from === "string" ? from : "/")));
   // Node exposes `runMain` on the `module` builtin (=== Module.runMain); real
@@ -1861,6 +1883,7 @@ export function createRuntime({
   // running process's directory, the same precedent __ocImport already sets above. It is
   // a factory so it is built at the moment of use and a `process.chdir()` is honoured.
   const bunRuntime = createBunRuntime({
+    sqlite: sqlite.bun,
     process,
     Buffer,
     require: vvRootRequire,
@@ -1870,6 +1893,7 @@ export function createRuntime({
     resolveFrom: (specifier, fromDir) => moduleSystem.resolveFilename(specifier, fromDir),
   });
   for (const [name, mod] of Object.entries(bunRuntime.modules)) builtins[name] = mod;
+  builtins["bun:sqlite"] = sqlite.bun;
   // `{ dotenv: true }` additionally performs Bun's automatic `.env` loading into
   // process.env (see builtins/bun-env.js). It is a parameter rather than part of
   // installing the global because the CLI installs Bun for reasons that are not
@@ -1993,6 +2017,7 @@ export function createRuntime({
     /** External delivery from the kernel: a browser preview SSE tunnel message
      * ({type:'sse-open'|'sse-close', connId, ...}). Streams text/event-stream. */
     dispatchSse: (msg) => dispatchSse(msg),
+    dispatchHttpStream: (msg) => { httpStreamQueue.push(msg); loop.wakeNet(); },
     /** External delivery from the kernel: a cross-process pipe (UNIX socket)
      * message ({type:'pipe-open'|'pipe-data'|'pipe-shutdown'|'pipe-close',
      * connId, ...}) for a connection this process is an endpoint of. */

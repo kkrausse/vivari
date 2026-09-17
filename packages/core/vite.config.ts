@@ -33,6 +33,8 @@ function bundleServiceWorker(): Plugin {
 // consumer's bundler resolves the workers/wasm relative to node_modules, no
 // separate asset-hosting step required.
 export default defineConfig({
+  // Worker/WASM URLs stay relative to the distribution mount.
+  base: "./",
   plugins: [bundleServiceWorker()],
   build: {
     target: "es2022",
@@ -40,9 +42,12 @@ export default defineConfig({
     emptyOutDir: true,
     minify: false,
     lib: {
-      entry: fileURLToPath(new URL("./src/index.ts", import.meta.url)),
+      entry: {
+        index: fileURLToPath(new URL("./src/index.ts", import.meta.url)),
+        host: fileURLToPath(new URL("./src/host-sdk/index.ts", import.meta.url)),
+      },
       formats: ["es"],
-      fileName: () => "index.js",
+      fileName: (_format, name) => `${name}.js`,
     },
     rollupOptions: {
       output: {

@@ -5,14 +5,21 @@
 
 import { parentPort } from "node:worker_threads";
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import { FsServer } from "../packages/kernel-host/fs-server.js";
 import { createDepCache } from "../packages/kernel-host/dep-cache.js";
+import { createSqliteServer } from "../packages/kernel-host/sqlite-server.js";
+import { installTree } from "../packages/kernel-host/install-tree.js";
 
 const require = createRequire(import.meta.url);
 const wasm = require("../packages/vfs/pkg-node/vivari_vfs.js");
 
 const vfs = new wasm.VirtualFileSystem();
 const server = new FsServer(vfs);
+server.onMutation = (path) => parentPort.postMessage({ type: "vv-fs-changed", path });
+server.sqlite = await createSqliteServer(vfs, null, {
+  wasmBinary: readFileSync(require.resolve("@sqlite.org/sqlite-wasm/sqlite3.wasm")),
+});
 // Mirror of the browser fs-worker: report a finished read of a kernel-fetched body
 // so the kernel can free the scratch file. Kept in step so headless spikes exercise
 // the same body lifetime the browser does.
@@ -73,6 +80,16 @@ const depCacheReady = (async () => {
 
 parentPort.on("message", (msg) => {
   switch (msg.type) {
+    case "workspace-install-tree":
+      installTree(server, msg).then(
+        result => parentPort.postMessage({ type: "vv-reply", reqId: msg.reqId, ok: true, ...result }),
+        error => parentPort.postMessage({ type: "vv-reply", reqId: msg.reqId, ok: false, error: String(error?.message || error) }),
+      );
+      break;
+    case "workspace-read":
+      try { parentPort.postMessage({ type: "vv-reply", reqId: msg.reqId, ok: true, bytes: vfs.read_file(msg.path) }); }
+      catch (error) { parentPort.postMessage({ type: "vv-reply", reqId: msg.reqId, ok: false, error: String(error) }); }
+      break;
     case "fs-register":
       server.register(msg.client, msg.sab, msg.port || null);
       break;

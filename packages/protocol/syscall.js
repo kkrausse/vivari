@@ -191,6 +191,11 @@ export const OP_UTIMES = 36;
 export const OP_FCHMOD = 37;
 export const OP_FUTIMES = 38;
 
+// FS-worker-owned SQLite. field0=request file path; response is written to
+// path+'.out' using normal chunked VFS I/O. ACK follows durable commit flush.
+// 34 belongs to blocking stdin; 35–38 retain upstream metadata wire shapes.
+export const OP_SQLITE = 39;
+
 export const OP_PIPE_LISTEN = 31;
 export const OP_PIPE_CONNECT = 32;
 export const OP_PIPE_CLOSE_SERVER = 33;
@@ -232,6 +237,7 @@ export function isFsOpcode(op) {
     (op >= OP_READ_FILE && op <= OP_READLINK) ||
     (op >= OP_OPEN && op <= OP_FTRUNCATE) ||
     op === OP_LINK ||
+    op === OP_SQLITE ||
     op === OP_WATCH ||
     op === OP_UNWATCH ||
     (op >= OP_CHMOD && op <= OP_FUTIMES)

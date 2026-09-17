@@ -261,7 +261,7 @@ import { createBunFile } from "./bun-file.js";
 import { createBunCrypto } from "./bun-crypto.js";
 import { createBunWorker } from "./bun-worker.js";
 import { createHTMLRewriter } from "./bun-html-rewriter.js";
-import { createBunSqlite, createVivariSqliteHost } from "./bun-sqlite.js";
+import { makeWasmFfi, makeNodeWasmFfi } from "./ffi.js";
 import { createBunTest } from "./bun-test.js";
 import {
   normalizeServeOptions,
@@ -334,7 +334,8 @@ export const BUN_REVISION = BUN_VERSION + "-vivari";
 // entry in the modules object below. It is a factory rather than a require so it is built
 // at the moment of use and therefore honours a `process.chdir()`, and it is optional so a
 // caller that has only the root require (tests, older embedders) still works.
-export function createBunRuntime({ process, Buffer, require, makeCwdRequire, resolveFrom }) {
+export function createBunRuntime({ process, Buffer, require, makeCwdRequire, resolveFrom, sqlite }) {
+  const ffi = makeWasmFfi({ require });
   const lazy = (name) => require(name);
 
   // Bun.build / Bun.plugin (./bun-build.js). `resolveFrom` is the module loader's
@@ -1744,7 +1745,7 @@ export function createBunRuntime({ process, Buffer, require, makeCwdRequire, res
     mmap: unsupported.mmap,
     peek: unsupported.peek,
     secrets: unsupported.secrets,
-    dlopen: unsupported.dlopen,
+    dlopen: ffi.dlopen,
     generateHeapSnapshot: unsupported.generateHeapSnapshot,
     openInEditor: unsupported.openInEditor,
     // Named rather than absent. `Bun.postgres` and the rest used to be `undefined`,
@@ -1759,7 +1760,7 @@ export function createBunRuntime({ process, Buffer, require, makeCwdRequire, res
     S3Client: s3api.S3Client,
     s3: s3api.s3,
     // The bun:ffi module, reachable off the global as Bun.FFI, as in Bun.
-    FFI: unsupported.FFI,
+    FFI: ffi,
 
     // ---- the small real ones that were simply missing ------------------------
     // Cheap to provide and wrong to omit: each one silently read as `undefined`,
@@ -1787,12 +1788,13 @@ export function createBunRuntime({ process, Buffer, require, makeCwdRequire, res
   const modules = {
     "bun:test": createBunTest({ process, lazy, deepEquals: bunDeepEquals, deepMatch: bunDeepMatch }),
     "bun:jsc": makeBunJsc(),
-    "bun:ffi": createBunFfi(),
+    "bun:ffi": ffi,
+    "node:ffi": makeNodeWasmFfi(ffi),
     // Real SQLite on the vendored sqlite3.wasm, over a custom VFS backed by Vivari's
     // synchronous fs — see ./bun-sqlite.js for the whole design, including what is
     // honestly missing (fsync, locking, WAL). Nothing is loaded until the first
     // `new Database()`: this call only builds the host descriptor.
-    "bun:sqlite": createBunSqlite(createVivariSqliteHost({ require, makeCwdRequire, process })),
+    "bun:sqlite": sqlite,
     // The bare `bun` specifier — `import { $, file, write, serve } from "bun"`,
     // which is how Bun's own docs reach most of this surface, and what every
     // copied-in snippet uses. It was missing entirely, so those imports failed

@@ -192,6 +192,7 @@ parentPort.on("message", (msg) => {
   else if (msg.type === "ws-open" || msg.type === "ws-in" || msg.type === "ws-close")
     onControl((c) => c.dispatchWs(msg));
   // A browser preview SSE tunnel message relayed by the kernel.
+  else if (msg.type === "http-stream") onControl((c) => c.dispatchHttpStream(msg));
   else if (msg.type === "sse-open" || msg.type === "sse-close")
     onControl((c) => c.dispatchSse(msg));
   // A cross-process pipe (UNIX socket) message relayed by the kernel.

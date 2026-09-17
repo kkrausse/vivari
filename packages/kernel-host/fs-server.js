@@ -54,6 +54,7 @@ import {
   OP_FTRUNCATE,
   OP_WATCH,
   OP_UNWATCH,
+  OP_SQLITE,
 } from "../protocol/syscall.js";
 
 const EMPTY = new Uint8Array(0);
@@ -149,6 +150,7 @@ export class FsServer {
   }
 
   unregister(clientId) {
+    this.sqlite?.release(clientId);
     this.clients.delete(clientId);
     // Drop any watches this client still held (its process is gone).
     if (this.watches.size) {
@@ -190,6 +192,7 @@ export class FsServer {
   // (or the basename for a single-file watch). 'rename' = add/remove/rename,
   // 'change' = contents changed; chokidar (Vite's watcher) re-stats either way.
   notifyWatch(path, event) {
+    if (this.onMutation) this.onMutation(path, event);
     if (this.watches.size === 0) return;
     // Only watches sharing this path's top segment (or a root "/" watch) can
     // possibly cover it — scan just those buckets, not every registration.
@@ -225,6 +228,21 @@ export class FsServer {
     const opcode = Atomics.load(ctrl, I_OPCODE);
     const { flags, fields } = decodeRequest(data.slice(0, Atomics.load(ctrl, I_REQ_LEN)));
     try {
+      if (opcode === OP_SQLITE) {
+        if (!this.sqlite) throw new Error("SQLite backend unavailable");
+        this.sqlite.request(clientId, decodeBytes(fields[0])).then(() => {
+          Atomics.store(ctrl, I_RES_LEN, 0);
+          Atomics.store(ctrl, I_STATE, STATE_RESPONSE_OK);
+          Atomics.notify(ctrl, I_STATE);
+        }, err => {
+          const bytes = encodeString(String(err.message || err)).subarray(0, data.length);
+          data.set(bytes);
+          Atomics.store(ctrl, I_RES_LEN, bytes.length);
+          Atomics.store(ctrl, I_STATE, STATE_RESPONSE_ERR);
+          Atomics.notify(ctrl, I_STATE);
+        });
+        return;
+      }
       const bytes = this.dispatch(opcode, flags, fields, clientId);
       if (bytes.length > data.length) {
         // The response doesn't fit the shared window (e.g. a whole-file read of a
@@ -290,7 +308,7 @@ export class FsServer {
       const existed = this.couldNotify(e.path) ? this.vfs.exists(e.path) : false;
       this.vfs.write_file(e.path, bytes);
       if (p) p.onWrite(e.path);
-      if (this.watches.size) this.notifyWatch(e.path, existed ? "change" : "rename");
+      this.notifyWatch(e.path, existed ? "change" : "rename");
     }
     return entries.length;
   }

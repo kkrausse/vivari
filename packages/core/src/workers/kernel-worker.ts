@@ -1239,8 +1239,11 @@ function baseProcEnv(dir) {
 // hooks (below), so this coexists with the terminal (termByPid) routing.
 const execByPid = new Map(); // pid -> execId
 const pidByExec = new Map(); // execId -> pid
+const listenerIds = new Map();
+let listenerSeq = 0;
+const listenerGeneration = crypto.randomUUID();
 
-async function spawnProcess(execId, command, args, cwd, extraEnv) {
+async function spawnProcess(execId, command, args, cwd, extraEnv, terminal, stdioCredits) {
   if (!kernel) {
     post("proc-exit", { execId, code: 127, error: "kernel not ready" });
     return;
@@ -1254,7 +1257,7 @@ async function spawnProcess(execId, command, args, cwd, extraEnv) {
   // which the kernel gates itself), so the gate has to run here.
   await kernel.ensureCommandLoaded(command);
   if (!kernel) return;
-  const pid = kernel.launch(command, Array.isArray(args) ? args : [], { cwd: dir, env });
+  const pid = kernel.launch(command, Array.isArray(args) ? args : [], { cwd: dir, env, terminal, stdioCredits });
   if (pid < 0) {
     post("proc-exit", { execId, code: 127, error: command + ": not found" });
     return;
@@ -1472,7 +1475,7 @@ async function boot() {
     fsWorker.onmessage = (event) => {
       if (event.data.type === "ready") resolve();
       // The FS worker logs OPFS restore status; relay it to the host UI.
-      else if (event.data.type === "log") post("log", event.data);
+      else if (["log", "workspace-persistence", "vv-reply", "vv-fs-changed"].includes(event.data.type)) post(event.data.type, event.data);
       // Structured boot progress (OPFS restore done/total) — relay for the UI.
       else if (event.data.type === "boot-progress")
         post("boot-progress", {
@@ -1762,7 +1765,7 @@ async function boot() {
       // `error` is set only when the process died of a worker fault rather than
       // exiting, so an SDK consumer can tell "the program failed" from "the VM lost
       // the program". The other proc-exit sites already carry this field.
-      post("proc-exit", { execId: eid, code: res.code, ...(res.error ? { error: res.error } : {}) });
+      post("proc-exit", { execId: eid, code: res.code, signal: res.signal, ...(res.error ? { error: res.error } : {}) });
       return;
     }
     const tid = termByPid.get(pid);
@@ -1807,7 +1810,9 @@ async function boot() {
   };
   kernel.onListen = (port, pid) => {
     listening.add(port);
-    post("listen", { port, pid });
+    const listenerId = listenerGeneration + ":" + (++listenerSeq);
+    listenerIds.set(port, listenerId);
+    post("listen", { port, pid, listenerId });
     // `listen` is the raw bind; it is NOT safe to point a preview at yet. Drive
     // real GET /'s through the kernel until one is answered and announce THAT as
     // `serving`, so an SDK consumer's iframe never loads into a momentarily-closed
@@ -1869,7 +1874,11 @@ async function boot() {
   };
   // The mirror of onListen: a server closed its port, or the process holding it
   // died. Fires before onProcExit, so `listening` is still populated here.
-  kernel.onClose = (port) => {
+  kernel.onStdioOverflow = (pid, channel) => post("proc-output-error", { execId: execByPid.get(pid), channel });
+  kernel.onClose = (port, pid) => {
+    const listenerId = listenerIds.get(port);
+    listenerIds.delete(port);
+    post("unlisten", { port, pid, listenerId });
     if (!listening.delete(port)) return;
     servingProbed.delete(port);
     post("port-close", { port });
@@ -2510,6 +2519,28 @@ async function runSearch(m) {
 
 self.onmessage = async (event) => {
   const m = event.data;
+  if (m.type === "workspace-install-tree") {
+    try {
+      const buffers = [...new Set(m.entries.filter(e => e.kind === "file").map(e => e.bytes.buffer))];
+      fsWorkerRef.postMessage(m, buffers);
+    } catch (error) { post("vv-reply", { reqId: m.reqId, ok: false, error: String(error) }); }
+    return;
+  }
+  if (["workspace-flush", "workspace-persistence", "workspace-read"].includes(m.type)) {
+    fsWorkerRef.postMessage(m);
+    return;
+  }
+  if (m.type === "workspace-listeners") {
+    post("vv-reply", { reqId: m.reqId, ok: true, listeners: [...listenerIds].map(([port, listenerId]) => ({ port, listenerId })) });
+    return;
+  }
+  if (m.type === "workspace-write") {
+    try {
+      await kernel.writeFilesBatch([{ path: m.path, bytes: m.bytes }]);
+      post("vv-reply", { reqId: m.reqId, ok: true });
+    } catch (error) { post("vv-reply", { reqId: m.reqId, ok: false, error: String(error) }); }
+    return;
+  }
 
   if (m.type === "init") {
     // Default on: only an explicit `compress: false` (BootOptions.compress) disables it.
@@ -2610,7 +2641,11 @@ self.onmessage = async (event) => {
   // Run one command directly (no wrapping shell) and stream its output/exit back
   // by `execId`. See spawnProcess + the execByPid routing in boot().
   if (m.type === "proc-spawn") {
-    void spawnProcess(m.execId, m.command, m.args, m.cwd, m.env).catch((err) =>
+    if (m.listenerId && listenerIds.get(m.port) !== m.listenerId) {
+      post("proc-exit", { execId: m.execId, code: 127, error: "listener closed" });
+      return;
+    }
+    void spawnProcess(m.execId, m.command, m.args, m.cwd, m.env, m.terminal, m.stdioCredits).catch((err) =>
       post("proc-exit", { execId: m.execId, code: 127, error: (err && err.message) || String(err) }),
     );
     return;
@@ -3086,10 +3121,26 @@ self.onmessage = async (event) => {
     return;
   }
 
+  if (m.type === "workspace-http-stream") {
+    const channel = event.ports[0];
+    if (!channel) return;
+    if (!kernel || !m.listenerId || listenerIds.get(m.port) !== m.listenerId) {
+      channel.postMessage({ op: "error", error: "HTTP listener closed" });
+      channel.close();
+      return;
+    }
+    kernel.openHttpStream(m.port, m.request, channel);
+    return;
+  }
+
   // A preview request relayed from the main thread. The Service Worker's reply
   // port was transferred to us, so we answer it directly.
   if (m.type === "vv-http") {
     const port = event.ports[0];
+    if (m.req.listenerId && listenerIds.get(m.req.port) !== m.req.listenerId) {
+      port.postMessage({ status: 410, headers: {}, body: "workspace listener closed\n" });
+      return;
+    }
     if (!kernel) {
       port.postMessage({ status: 503, headers: {}, body: "kernel not ready\n" });
       return;

@@ -518,7 +518,21 @@ function stripTypes(src) {
         const isExportClause = kw === "export" && nx >= 0 && toks[nx].type === "punc" && (toks[nx].value === "{" || toks[nx].value === "*");
         if (isImportDecl || isExportClause) {
           const end = moduleStatementEnd(toks, nx);
-          for (let k = i; k < end; k++) emit(toks[k].value);
+          let braces = 0;
+          for (let k = i; k < end; k++) {
+            const token = toks[k];
+            if (token.value === "{") braces++;
+            if (token.value === "}") braces--;
+            const before = prevSig(toks, k), after = nextSig(toks, k);
+            if (braces === 1 && token.value === "type" &&
+                ["{", ","].includes(toks[before]?.value) &&
+                toks[after]?.type === "id" && toks[after].value !== "as") {
+              while (k < end && ![",", "}"].includes(toks[k].value)) k++;
+              if (toks[k]?.value === "}") k--;
+              continue;
+            }
+            emit(token.value);
+          }
           i = end;
           continue;
         }

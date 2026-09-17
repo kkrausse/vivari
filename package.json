@@ -64,6 +64,7 @@
     "og:check": "node scripts/og-cards.mjs --check"
   },
   "devDependencies": {
+    "@sqlite.org/sqlite-wasm": "3.49.1-build1",
     "@resvg/resvg-js": "^2.6.2"
   }
 }

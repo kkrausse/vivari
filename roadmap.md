@@ -1,5 +1,22 @@
 # Vivari — Roadmap
 
+## Integrated browser boot — 2026-09-17 UTC
+
+The candidate now boots the real toolkit TODO editor, unchanged OpenCode 2.0.3,
+and guest Vite preview in the browser. An observed bulk-install API mismatch was
+fixed by using upstream `set_mode`; both real-VFS installation tests pass.
+Toolkit delivery explicitly distinguishes six-slot/SQLite39 ABI and rejects old
+manifests. Served-worker hashes were verified against the packaged assets. This is boot
+evidence, not model/tool/reload durability qualification or pin promotion.
+
+## Downstream reconciliation — 2026-09-16
+
+The browser-agent-toolkit fork is being compared against upstream `9a89ff3` on
+`integration/upstream-runtime`. The comparison identified syscall ABI collisions
+and downstream contracts that require explicit integration. Upstream is the preferred new baseline; the downstream
+streaming, workspace and SQLite contracts still require deliberate porting.
+This checkpoint is a comparison only, not a qualified replacement runtime.
+
 Built on the principle **de-risk the hardest part first**: prove the riskiest
 primitive (synchronous cross-thread access to a shared kernel) before expanding.
 

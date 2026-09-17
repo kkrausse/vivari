@@ -117,16 +117,25 @@ Key relationships:
 One SAB per client, laid out as:
 
 ```
-[ control: 4 × Int32 = 16 bytes ][ data region: 1 MiB ]
+[ control: 6 × Int32 = 24 bytes ][ data region: 1 MiB ]
 
 control[0] = STATE    (Atomics.wait / notify on this word)
 control[1] = OPCODE   (which syscall)
 control[2] = REQ_LEN  (request bytes in the data region)
 control[3] = RES_LEN  (response bytes in the data region)
+control[4] = SIGNAL   (pending-signal bitmask)
+control[5] = reserved (8-byte data alignment)
 ```
 
 STATE values: `IDLE=0`, `REQUEST=1` (worker→servicer), `RESPONSE_OK=2`,
 `RESPONSE_ERR=3` (a UTF-8 errno like `ENOENT`).
+
+The integration candidate retains upstream stdin/metadata opcodes 34–38 and
+adds FS-owner SQLite at opcode 39. Toolkit delivery identifies this combination
+as `workspace-v2-sab6-sqlite39`; the host rejects older ABI manifests and missing
+install-tree, HTTP-stream, or workspace-flush features before creating a worker.
+Packaging verifies the source protocol and all bundled assets against its build
+receipt. Candidate identity is not a release qualification or source-pin update.
 
 Request frame in the data region is self-describing:
 `[flags:u32][fieldCount:u32]([len:u32][bytes])*`. Scalars (fds, lengths, file

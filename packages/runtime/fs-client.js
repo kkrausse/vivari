@@ -58,6 +58,7 @@ import {
   OP_READ_STDIN,
   OP_WATCH,
   OP_UNWATCH,
+  OP_SQLITE,
   OP_PIPE_LISTEN,
   OP_PIPE_CONNECT,
   OP_PIPE_CLOSE_SERVER,
@@ -115,6 +116,7 @@ export function createSyscalls({ ctrl, data, notify, onSignal = null }) {
   }
 
   return {
+    sqlite(inputPath) { call(OP_SQLITE, encodeRequest([b(inputPath)])); },
     readFile: (p) => call(OP_READ_FILE, encodeRequest([b(p)])),
     writeFile: (p, content) => {
       const body = typeof content === "string" ? b(content) : content;
