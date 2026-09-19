@@ -1,6 +1,6 @@
 import { WorkspaceError, type Distribution } from "./types.js";
 import type { diagnosticReporter } from "./diagnostics.js";
-import type { PersistenceState, InstallTreeEntry, TreeInstallResult } from "./types.js";
+import type { PersistenceState, InstallTreeEntry, InstallTreeImageEntry, TreeInstallResult } from "./types.js";
 
 // Private transport boundary. Worker protocol never escapes to consumers.
 export type Message = { type: string; [key: string]: unknown };
@@ -92,6 +92,12 @@ export class Host {
     const result = await this.request("workspace-install-tree", tree);
     return { files: Number(result.files), verifyMs: Number(result.verifyMs), installMs: Number(result.installMs), readbackMs: Number(result.readbackMs) };
   }
+  async installTreeImage(tree: { roots: string[]; entries: InstallTreeImageEntry[] }): Promise<TreeInstallResult> {
+    if (!this.features.has("install-tree-image-v1")) throw new Error("Runtime lacks prepared tree image installation");
+    const buffers = [...new Set(tree.entries.flatMap(entry => entry.kind === "file" ? [entry.bytes.buffer] : []))];
+    const result = await this.request("workspace-install-tree-image", tree, buffers);
+    return { files: Number(result.files), verifyMs: Number(result.verifyMs), installMs: Number(result.installMs), readbackMs: Number(result.readbackMs) };
+  }
   onMutation(listener: (path: string) => void): () => void {
     return this.on(m => { if (m.type === "vv-fs-changed") listener(String(m.path)); });
   }
@@ -118,11 +124,11 @@ export class Host {
     if (this.dead) throw new WorkspaceError("CLOSED", "Workspace host is closed");
     this.worker.postMessage({ type, ...data }, transfer);
   }
-  request(type: string, data: Record<string, unknown> = {}): Promise<Message> {
+  request(type: string, data: Record<string, unknown> = {}, transfer: Transferable[] = []): Promise<Message> {
     return new Promise((resolve, reject) => {
       const reqId = this.sequence++;
       this.pending.set(reqId, { resolve, reject });
-      try { this.post(type, { ...data, reqId }); } catch (e) { this.pending.delete(reqId); reject(e); }
+      try { this.post(type, { ...data, reqId }, transfer); } catch (e) { this.pending.delete(reqId); reject(e); }
     });
   }
   private swReady?: Promise<void>;

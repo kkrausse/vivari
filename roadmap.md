@@ -1,5 +1,15 @@
 # Vivari — Roadmap
 
+## Preparation-built managed VFS images — 2026-09-19 UTC
+
+Fresh managed-tree delivery can now import checked raw/zlib file bodies produced
+at application preparation time instead of running the VFS's level-6 compressor
+for every file in the browser. The exact 31,973-entry IRS tree fell from
+6.72–6.84s to 1.37–1.41s in the headless VFS contract while retaining roughly
+109 MB of physical VFS file data. Logical SHA-256, exact inflated length, stream
+bounds, paths, modes and symlinks are validated before replacement; malformed
+images leave the old roots intact. Browser qualification remains separate.
+
 ## Integrated browser boot — 2026-09-17 UTC
 
 The candidate now boots the real toolkit TODO editor, unchanged OpenCode 2.0.3,

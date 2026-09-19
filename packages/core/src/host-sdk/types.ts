@@ -14,6 +14,10 @@ export type InstallTreeEntry =
   | { kind: "directory"; path: string; mode: number }
   | { kind: "symlink"; path: string; target: string }
   | { kind: "file"; path: string; mode: number; bytes: Uint8Array; sha256: string; verifyReadback?: boolean };
+export type InstallTreeImageEntry =
+  | { kind: "directory"; path: string; mode: number }
+  | { kind: "symlink"; path: string; target: string }
+  | { kind: "file"; path: string; mode: number; bytes: Uint8Array; logicalBytes: number; encoding: 0 | 1; sha256: string };
 export interface TreeInstallResult { files: number; verifyMs: number; installMs: number; readbackMs: number }
 export interface NodeLaunchOptions {
   entry: string;

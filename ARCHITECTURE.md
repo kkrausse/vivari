@@ -215,6 +215,14 @@ only wired when `VV_DEBUG` is set, so non-debug runs never allocate it.
   `node_modules` (the largest addressable term in the tab). **On by default**; `?compress=0`
   disables it (plumbed page → kernel worker → FS worker, applied before OPFS restore).
   `mem_bytes()`/`logical_mem_bytes()` back the "Measure Memory" ratio readout.
+- **Preparation-built managed images**: `workspace-install-tree-image` accepts the
+  same disposable roots and metadata as bulk tree installation, but files carry
+  the VFS's retained raw or zlib-level-6 body. Before removing any root, the FS
+  worker inflates compressed bodies, checks exact logical lengths and SHA-256
+  digests, and rejects malformed/trailing data. `write_file_body` checks the zlib
+  stream again while inserting it without recompression. The versioned
+  `install-tree-image-v1` feature is intentionally separate from ordinary
+  `install-tree-v1`; modes and symlinks retain the same replacement semantics.
 - **Per-PID memory attribution**: "Measure Memory" also breaks the Process Worker heap
   down by PID. Each worker answers a `proc-mem` query with `runtime.memStats()` — its own JS
   heap (`performance.memory`, unavailable in Chrome Workers so effectively `-1`; the main-thread

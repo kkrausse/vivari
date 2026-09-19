@@ -2,6 +2,18 @@
 // syscall, guest process, or main-thread round trip is needed. Call before launch;
 // this replaces the supplied roots and is not a transactional live-tree update.
 export async function installTree(server, { roots, entries }) {
+  return installTreeImpl(server, { roots, entries }, false);
+}
+
+// Install a preparation-built image whose file entries already carry the VFS's
+// retained raw/zlib body representation. Logical bytes are validated before any
+// managed root is removed, then the checked bodies are inserted without running
+// the level-6 compressor again.
+export async function installTreeImage(server, { roots, entries }) {
+  return installTreeImpl(server, { roots, entries }, true);
+}
+
+async function installTreeImpl(server, { roots, entries }, encoded) {
   const started = performance.now();
   const validPath = (p) => typeof p === "string" && p.startsWith("/") && p !== "/"
     && !p.split("/").slice(1).some(part => !part || part === "." || part === ".." || /[\\\0]/.test(part));
@@ -13,6 +25,8 @@ export async function installTree(server, { roots, entries }) {
     if (!validPath(e.path) || !rootFor(e.path) || paths.has(e.path)) throw Error("Invalid tree path");
     if (e.kind === "file") {
       if (!(e.bytes instanceof Uint8Array) || !/^[a-f0-9]{64}$/.test(e.sha256)) throw Error("Invalid tree file");
+      if (encoded && (!Number.isSafeInteger(e.logicalBytes) || e.logicalBytes < 0 || e.logicalBytes > 0xffffffff
+        || !Number.isInteger(e.encoding) || e.encoding < 0 || e.encoding > 1)) throw Error("Invalid encoded tree file");
     } else if (e.kind === "symlink") {
       if (typeof e.target !== "string" || !e.target || e.target.startsWith("/") || /[\\\0]/.test(e.target)) throw Error("Invalid tree symlink");
     } else if (e.kind !== "directory") throw Error("Invalid tree entry");
@@ -39,24 +53,52 @@ export async function installTree(server, { roots, entries }) {
     return "/" + resolved.join("/");
   }
   for (const e of entries) if (e.kind === "symlink" && rootFor(follow(e.path)) !== rootFor(e.path)) throw Error("Escaping tree symlink");
+  const vfs = server.vfs;
   const digest = async bytes => [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(b => b.toString(16).padStart(2, "0")).join("");
+  const decode = async e => {
+    if (e.encoding === 0) return e.bytes;
+    return new Uint8Array(await new Response(new Blob([e.bytes]).stream()
+      .pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
+  };
   const hashes = new Map(), files = entries.filter(e => e.kind === "file");
-  let next = 0;
-  const results = await Promise.allSettled(Array.from({ length: Math.min(8, files.length) }, async () => {
-    while (next < files.length) {
-      const e = files[next++];
-      let ranges = hashes.get(e.bytes.buffer);
-      if (!ranges) hashes.set(e.bytes.buffer, ranges = new Map());
-      const key = `${e.bytes.byteOffset}:${e.bytes.byteLength}`;
-      let hash = ranges.get(key);
-      if (!hash) ranges.set(key, hash = digest(e.bytes));
-      if (await hash !== e.sha256) throw Error(`Tree integrity failure: ${e.path}`);
-    }
-  }));
-  const failed = results.find(r => r.status === "rejected");
-  if (failed) throw failed.reason;
+  if (encoded) {
+    let next = 0;
+    const results = await Promise.allSettled(Array.from({ length: Math.min(8, files.length) }, async () => {
+      while (next < files.length) {
+        const e = files[next++];
+        let ranges = hashes.get(e.bytes.buffer);
+        if (!ranges) hashes.set(e.bytes.buffer, ranges = new Map());
+        const key = `${e.bytes.byteOffset}:${e.bytes.byteLength}:${e.logicalBytes}:${e.encoding}:${e.sha256}`;
+        let valid = ranges.get(key);
+        if (!valid) ranges.set(key, valid = (async () => {
+          try {
+            const raw = await decode(e);
+            return raw.length === e.logicalBytes && await digest(raw) === e.sha256;
+          } catch { return false; }
+        })());
+        if (!await valid) throw Error(`Tree integrity failure: ${e.path}`);
+      }
+    }));
+    const failed = results.find(r => r.status === "rejected");
+    if (failed) throw failed.reason;
+  } else {
+    let next = 0;
+    const results = await Promise.allSettled(Array.from({ length: Math.min(8, files.length) }, async () => {
+      while (next < files.length) {
+        const e = files[next++];
+        let ranges = hashes.get(e.bytes.buffer);
+        if (!ranges) hashes.set(e.bytes.buffer, ranges = new Map());
+        const key = `${e.bytes.byteOffset}:${e.bytes.byteLength}`;
+        let hash = ranges.get(key);
+        if (!hash) ranges.set(key, hash = digest(e.bytes));
+        if (await hash !== e.sha256) throw Error(`Tree integrity failure: ${e.path}`);
+      }
+    }));
+    const failed = results.find(r => r.status === "rejected");
+    if (failed) throw failed.reason;
+  }
   const verified = performance.now();
-  const vfs = server.vfs, persistence = server.persistence;
+  const persistence = server.persistence;
   for (const root of roots) {
     const parts = root.split("/").slice(1);
     for (let i = 1; i < parts.length; i++) {
@@ -83,7 +125,11 @@ export async function installTree(server, { roots, entries }) {
   for (const root of roots) remove(root);
   const directories = entries.filter(e => e.kind === "directory").sort((a, b) => a.path.length - b.path.length);
   for (const e of directories) { vfs.mkdir(e.path, true); persistence?.onWrite(e.path); }
-  for (const e of files) { vfs.write_file(e.path, e.bytes); persistence?.onWrite(e.path); }
+  for (const e of files) {
+    if (encoded) vfs.write_file_body(e.path, e.bytes, e.logicalBytes, e.encoding);
+    else vfs.write_file(e.path, e.bytes);
+    persistence?.onWrite(e.path);
+  }
   for (const e of entries) if (e.kind === "symlink") { vfs.symlink(e.target, e.path); persistence?.onWrite(e.path); }
   for (const e of [...files, ...directories.reverse()]) vfs.set_mode(e.path, e.mode, true);
   for (const root of roots) server.notifyWatch(root, "rename");

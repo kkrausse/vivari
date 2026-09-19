@@ -2519,7 +2519,7 @@ async function runSearch(m) {
 
 self.onmessage = async (event) => {
   const m = event.data;
-  if (m.type === "workspace-install-tree") {
+  if (m.type === "workspace-install-tree" || m.type === "workspace-install-tree-image") {
     try {
       const buffers = [...new Set(m.entries.filter(e => e.kind === "file").map(e => e.bytes.buffer))];
       fsWorkerRef.postMessage(m, buffers);

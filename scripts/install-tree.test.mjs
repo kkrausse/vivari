@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
 import { Worker } from 'node:worker_threads';
 import { createRequire } from 'node:module';
 import { FsServer } from '../packages/kernel-host/fs-server.js';
-import { installTree } from '../packages/kernel-host/install-tree.js';
+import { installTree, installTreeImage } from '../packages/kernel-host/install-tree.js';
 
 test('bulk tree installs binary files and links; verifies before reset and preserves source', { timeout: 10000 }, async () => {
   const worker = new Worker(new URL('./fs-worker.mjs', import.meta.url));
@@ -69,5 +70,33 @@ test('tree metadata and root invalidations use the real VFS and preserve symlink
     vfs.symlink('/workspace', '/redirect');
     await assert.rejects(installTree(server, { roots: ['/redirect/deps'], entries: [] }), /root parent/);
     assert.deepEqual(vfs.read_file('/workspace/deps/bin'), bytes);
+  } finally { vfs.free(); }
+});
+
+test('prepared VFS bodies validate logical bytes before replacement and preserve metadata', async () => {
+  const { VirtualFileSystem } = createRequire(import.meta.url)('../packages/vfs/pkg-node/vivari_vfs.js');
+  const vfs = new VirtualFileSystem(), server = new FsServer(vfs);
+  const raw = new TextEncoder().encode('prepared body '.repeat(2000));
+  const compressed = new Uint8Array(deflateSync(raw, { level: 6 }));
+  const hash = createHash('sha256').update(raw).digest('hex');
+  vfs.mkdir('/workspace/deps', true);
+  vfs.write_file('/workspace/deps/existing', new TextEncoder().encode('preserved on rejection'));
+  const directory = { kind: 'directory', path: '/workspace/deps', mode: 0o750 };
+  const file = { kind: 'file', path: '/workspace/deps/tool', mode: 0o751, bytes: compressed,
+    logicalBytes: raw.length, encoding: 1, sha256: hash };
+  try {
+    await assert.rejects(installTreeImage(server, { roots: ['/workspace/deps'], entries: [directory,
+      { ...file, sha256: '0'.repeat(64) }] }), /integrity failure/);
+    assert.equal(new TextDecoder().decode(vfs.read_file('/workspace/deps/existing')), 'preserved on rejection');
+    const trailing = new Uint8Array(compressed.length + 1); trailing.set(compressed); trailing[trailing.length - 1] = 1;
+    await assert.rejects(installTreeImage(server, { roots: ['/workspace/deps'], entries: [directory,
+      { ...file, bytes: trailing }] }), /integrity failure/);
+    assert.equal(new TextDecoder().decode(vfs.read_file('/workspace/deps/existing')), 'preserved on rejection');
+    await installTreeImage(server, { roots: ['/workspace/deps'], entries: [directory, file,
+      { kind: 'symlink', path: '/workspace/deps/link', target: 'tool' }] });
+    assert.deepEqual(vfs.read_file('/workspace/deps/link'), raw);
+    assert.equal(JSON.parse(vfs.lstat('/workspace/deps')).mode & 0o777, 0o750);
+    assert.equal(JSON.parse(vfs.lstat('/workspace/deps/tool')).mode & 0o777, 0o751);
+    assert.ok(Number(vfs.mem_bytes()) < Number(vfs.logical_mem_bytes()));
   } finally { vfs.free(); }
 });

@@ -33,10 +33,7 @@ fn zlib_compress(raw: &[u8]) -> Vec<u8> {
     use flate2::write::ZlibEncoder;
     use flate2::Compression;
     use std::io::Write;
-    let mut enc = ZlibEncoder::new(
-        Vec::with_capacity(raw.len() / 3 + 64),
-        Compression::new(6),
-    );
+    let mut enc = ZlibEncoder::new(Vec::with_capacity(raw.len() / 3 + 64), Compression::new(6));
     if enc.write_all(raw).is_err() {
         return Vec::new();
     }
@@ -45,13 +42,20 @@ fn zlib_compress(raw: &[u8]) -> Vec<u8> {
 
 /// Inflate bytes produced by `zlib_compress`. `len` is the known logical length,
 /// used to pre-size the output buffer so there's a single allocation.
-fn zlib_decompress(data: &[u8], len: usize) -> Vec<u8> {
+fn zlib_decompress_checked(data: &[u8], len: usize) -> Option<Vec<u8>> {
     use flate2::read::ZlibDecoder;
     use std::io::Read;
     let mut dec = ZlibDecoder::new(data);
     let mut out = Vec::with_capacity(len);
-    dec.read_to_end(&mut out).ok();
-    out
+    dec.read_to_end(&mut out).ok()?;
+    if out.len() != len || dec.total_in() as usize != data.len() {
+        return None;
+    }
+    Some(out)
+}
+
+fn zlib_decompress(data: &[u8], len: usize) -> Vec<u8> {
+    zlib_decompress_checked(data, len).unwrap_or_default()
 }
 
 /// Slice `[start, start+len)` out of a byte buffer, clamped to its bounds.
@@ -525,6 +529,58 @@ impl VirtualFileSystem {
             // Content changed: drop any cached inflate, then (maybe) recompress.
             self.hot.invalidate(id);
             self.maybe_compress(id);
+            Ok(())
+        })()
+        .map_err(VfsError::code)
+    }
+
+    /// Insert a preparation-built body without recompressing it. Callers must
+    /// validate every body before destructive tree replacement; this method also
+    /// checks the stream and policy so malformed bytes cannot enter the VFS.
+    pub fn write_file_body(
+        &mut self,
+        path: String,
+        content: Vec<u8>,
+        logical_len: u32,
+        encoding: u32,
+    ) -> Result<(), String> {
+        let logical_len = logical_len as usize;
+        let body = match encoding {
+            0 if content.len() == logical_len => FileBody::Raw(content),
+            0 => return Err("EINVAL: raw file body length mismatch".into()),
+            1 if logical_len >= MIN_COMPRESS_BYTES
+                && (content.len() as f64) < (logical_len as f64) * MIN_COMPRESS_RATIO =>
+            {
+                if zlib_decompress_checked(&content, logical_len).is_none() {
+                    return Err("EINVAL: malformed compressed file body".into());
+                }
+                FileBody::Zip {
+                    data: content,
+                    len: logical_len,
+                }
+            }
+            1 => return Err("EINVAL: compressed file body violates VFS policy".into()),
+            _ => return Err("EINVAL: unsupported file body encoding".into()),
+        };
+        (|| {
+            let (parent, name) = self.resolve_parent(&path)?;
+            let id = match self.child_id(parent, &name) {
+                Some(cid) => {
+                    match &mut self.inodes.get_mut(&cid).unwrap().data {
+                        NodeData::File(existing) => *existing = body,
+                        NodeData::Dir(_) => return Err(VfsError::IsDir),
+                        NodeData::Symlink(_) => return Err(VfsError::Inval),
+                    }
+                    self.inodes.get_mut(&cid).unwrap().mtime = Self::now();
+                    cid
+                }
+                None => {
+                    let id = self.alloc(NodeData::File(body), 0o644);
+                    self.link_child(parent, &name, id);
+                    id
+                }
+            };
+            self.hot.invalidate(id);
             Ok(())
         })()
         .map_err(VfsError::code)

@@ -22,7 +22,7 @@ import { FsServer } from "../../../kernel-host/fs-server.js";
 import { createOpfsPersistence } from "../../../kernel-host/opfs-persistence.js";
 import { createDepCache } from "../../../kernel-host/dep-cache.js";
 import { createSqliteServer } from "../../../kernel-host/sqlite-server.js";
-import { installTree } from "../../../kernel-host/install-tree.js";
+import { installTree, installTreeImage } from "../../../kernel-host/install-tree.js";
 
 const post = (type, extra) => self.postMessage({ type, ...extra });
 
@@ -50,6 +50,12 @@ function handle(msg) {
   switch (msg.type) {
     case "workspace-install-tree":
       installTree(server, msg).then(
+        result => post("vv-reply", { reqId: msg.reqId, ok: true, ...result }),
+        error => post("vv-reply", { reqId: msg.reqId, ok: false, error: String(error?.message || error) }),
+      );
+      break;
+    case "workspace-install-tree-image":
+      installTreeImage(server, msg).then(
         result => post("vv-reply", { reqId: msg.reqId, ok: true, ...result }),
         error => post("vv-reply", { reqId: msg.reqId, ok: false, error: String(error?.message || error) }),
       );
