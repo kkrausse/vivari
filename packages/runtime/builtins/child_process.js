@@ -423,9 +423,27 @@ export function createChildProcess({ sys, process, Buffer, EventEmitter, Readabl
         const done = () => {
           if (--pending === 0) cp.emit("close", cp.exitCode, cp.signalCode);
         };
-        // If nobody is consuming a stream, resume it so its 'end' still fires.
+        // Node's child `close` means its stdio is closed, not specifically that
+        // every stream reached readable EOF. A consumer may deliberately destroy
+        // stdout after taking enough output (OpenCode's ripgrep result limit does
+        // this); that stream emits `close`, not `end`. It may already be destroyed
+        // before the child-exit delivery reaches this drain.
         for (const s of [cp.stdout, cp.stderr]) {
-          s.once("end", done);
+          if (s.destroyed) {
+            done();
+            continue;
+          }
+          let settled = false;
+          const streamClosed = () => {
+            if (settled) return;
+            settled = true;
+            s.off("end", streamClosed);
+            s.off("close", streamClosed);
+            done();
+          };
+          s.once("end", streamClosed);
+          s.once("close", streamClosed);
+          // If nobody is consuming a stream, resume it so its 'end' still fires.
           if (s.listenerCount("data") === 0) s.resume();
         }
         cp.stdout.push(null);
