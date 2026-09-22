@@ -1,5 +1,12 @@
 # Vivari — Roadmap
 
+## Symlink-safe recursive deletion — 2026-09-22 UTC
+
+Kernel recursive removal now classifies each directory entry with `lstat` rather
+than following it with `stat`. A directory symlink previously caused removal to
+walk into its target and then fail with `ENOTDIR` when `rmdir` reached the link;
+the corrected operation unlinks the symlink and leaves its target untouched.
+
 ## Preparation-built managed VFS images — 2026-09-19 UTC
 
 Fresh managed-tree delivery can now import checked raw/zlib file bodies produced

@@ -357,6 +357,13 @@ README.md · roadmap.md · research.md · ARCHITECTURE.md · AGENTS.md
 
 ## Critical gotchas (these have bitten us repeatedly)
 
+### Recursive removal must classify entries with `lstat`, not `stat`
+`stat` follows a trailing symlink. A recursive remover that uses it can walk out
+of the requested subtree through a directory symlink, erase the target's
+contents, and finally fail when `rmdir` receives the symlink itself (`ENOTDIR`).
+Use `lstat` to decide whether to recurse; symlinks are leaf entries and must be
+unlinked regardless of their target kind.
+
 ### A dead process worker used to be INVISIBLE — and "no output" is still not "dead"
 The single most expensive bug class in this project: a process that stops producing
 output, forever, with no error anywhere. It cost two full rounds of misdiagnosis on

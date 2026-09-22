@@ -2058,7 +2058,11 @@ const postFsChanged = (path, kind) => post("vv-fs-changed", { path, kind });
 function rmRecursive(path) {
   let st;
   try {
-    st = kernel.stat(path);
+    // Deletion must classify the directory entry itself. `stat()` follows a
+    // symlink, which made a link to a directory recurse into its target and then
+    // call rmdir on the link (ENOTDIR). Besides failing, that could erase files
+    // outside the requested subtree before the error surfaced.
+    st = kernel.fs.lstat(path);
   } catch {
     return; // already gone
   }
