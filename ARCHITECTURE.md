@@ -234,6 +234,10 @@ only wired when `VV_DEBUG` is set, so non-debug runs never allocate it.
   by `opfs-persistence.js` (write-behind). OPFS sync access handles only exist in a
   Worker — hence this lives in the FS worker. On boot it restores the manifest into
   the VFS **before** serving any syscall. Use `?reset` on the demo URL to wipe it.
+  The pending queue coalesces a delete followed by a write to the same path as a
+  subtree replacement: the drain removes old OPFS files and descendant manifest
+  entries before mirroring the path's current VFS state. A write-only coalescing
+  result would preserve deleted children across reload even when the live VFS is empty.
   Volatile/re-seeded paths are excluded (`fs-worker.js` `IGNORE`: `/bin /tmp /proc
   /dev /etc /usr /var/cache`). The package-manager caches deliberately live in a
   PERSISTED location (`/home/user/.cache` for npm/yarn/corepack, `/home/user/.local/
