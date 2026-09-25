@@ -11252,6 +11252,20 @@ why one wrong sentence about the module map survived three reviews. Skipping `ne
 keeps it about Node versions: `constants` compares host OpenSSL and zlib against the VM's
 and differs on any Node but the newest (measured: 48/49 on 22.16, that being the one).
 
+### OPFS bulk-root replacement keeps the delete across immediate recreation
+
+An isolated Chromium workspace test replaced `/workspace` and `/.server` with empty
+directory entries. The live VFS and `flush()` looked successful, but after reload
+the old source and chat descendants returned. The OPFS write-behind queue had
+coalesced `onDelete(root)` followed by `onWrite(root)` into a write, losing the
+subtree deletion and its manifest cleanup. The queue now retains a replacement
+operation that removes the old subtree and descendant metadata before reading
+the recreated root from the current VFS. The browser contract first failed on
+the old distribution and then passed against the rebuilt worker, including a
+separate empty-entries removal and an unrelated path outside both roots. This
+does not yet qualify any editor's full workspace-switch lifecycle or concurrent
+guest writes; callers still need to stop their runtime, flush, and verify.
+
 ### Not done
 
 - **`spike-site-headers.mjs` still has its own private answer.** Its `run-phase.ts` import

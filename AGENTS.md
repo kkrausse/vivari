@@ -357,6 +357,17 @@ README.md · roadmap.md · research.md · ARCHITECTURE.md · AGENTS.md
 
 ## Critical gotchas (these have bitten us repeatedly)
 
+### OPFS coalescing must retain deletion when a root is immediately recreated
+`installTree` removes a managed root and may recreate that same directory before
+the asynchronous OPFS mirror drains. A pending `onDelete(root)` overwritten by
+`onWrite(root)` mirrors the empty new directory but leaves the old descendants
+in OPFS and its manifest; they reappear on reload despite a successful flush.
+The queue's replace operation deletes the subtree and descendant metadata first,
+then mirrors the current root. Test this across an actual browser document reload,
+not just by reading the live VFS after install. The browser contract in
+`browser-agent-toolkit/workspace-api/tests/browser/storage-cases.ts` covers both
+recreated and absent roots, plus paths outside the managed roots.
+
 ### A dead process worker used to be INVISIBLE — and "no output" is still not "dead"
 The single most expensive bug class in this project: a process that stops producing
 output, forever, with no error anywhere. It cost two full rounds of misdiagnosis on
