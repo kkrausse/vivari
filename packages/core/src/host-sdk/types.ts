@@ -43,6 +43,9 @@ export interface Endpoint {
   readonly url: string;
   readonly port: number;
   readonly closed: Promise<{ reason: string }>;
+  /** Admission closure is not cleanup. Settles after disposal and every owned
+   * request read/cancel continuation; rejects if source cleanup failed. */
+  readonly settled: Promise<void>;
   fetch(input: string, init?: RequestInit): Promise<Response>;
   attachPreview(iframe: HTMLIFrameElement, options?: PreviewOptions): PreviewAttachment;
   dispose(): void;

@@ -9,6 +9,17 @@ export function createEndpoint(host: Host, port: number, listenerId: string, run
   let disposed = false, active = 0;
   let close!: (value: { reason: string }) => void;
   const closed = new Promise<{ reason: string }>(resolve => { close = resolve; });
+  let finish!: () => void, failed!: (reason: unknown) => void;
+  const settled = new Promise<void>((resolve, reject) => { finish = resolve; failed = reject; });
+  void settled.catch(() => {}); // observation only; callers still receive rejection
+  const requests = new Set<Promise<void>>();
+  const failures: unknown[] = [];
+  const track = (cleanup: Promise<void>) => {
+    requests.add(cleanup);
+    void cleanup.then(() => requests.delete(cleanup), error => {
+      failures.push(error); requests.delete(cleanup);
+    });
+  };
   const lifetime = new AbortController();
   const check = () => {
     if (reason || host.listeners.get(port) !== listenerId) throw new WorkspaceError("CLOSED", reason ?? "Listener closed");
@@ -18,6 +29,11 @@ export function createEndpoint(host: Host, port: number, listenerId: string, run
     disposed = true;
     reason ??= why; off(); runtimeSignal.removeEventListener("abort", stop);
     lifetime.abort(new WorkspaceError("CLOSED", why)); close({ reason });
+    void (async () => {
+      await Promise.allSettled([...requests]);
+      if (failures.length) failed(new AggregateError(failures, "Endpoint cleanup failed"));
+      else finish();
+    })();
   };
   const stop = () => dispose("Runtime stopped");
   const off = host.on(m => {
@@ -31,7 +47,7 @@ export function createEndpoint(host: Host, port: number, listenerId: string, run
   runtimeSignal.addEventListener("abort", stop, { once: true });
   const endpoint: Endpoint = {
     url: new URL(`/preview/${port}/?__vv_listener=${encodeURIComponent(listenerId)}`, location.href).href,
-    port, closed, dispose,
+    port, closed, settled, dispose,
     attachPreview(iframe, options) { return attachEndpointPreview(iframe, endpoint, { host, check }, options); },
     async fetch(input, init = {}) {
       check();
@@ -54,9 +70,10 @@ export function createEndpoint(host: Host, port: number, listenerId: string, run
       try {
         host.post("workspace-http-stream", { port, listenerId, request: metadata }, [port2]);
         active++;
-        return fetchHttpStream(port1, request, () => { active--; if (reason && !active) dispose(reason); });
+        return fetchHttpStream(port1, request, () => { active--; if (reason && !active) dispose(reason); }, track);
       } catch (error) { port1.close(); port2.close(); throw error; }
     },
   };
+  if (runtimeSignal.aborted) stop();
   return endpoint;
 }

@@ -120,6 +120,16 @@ successful case-1 close but a kernel target surviving the 15-second census; live
 worker retention versus target-observation lag remains unclassified. Do not relax
 that deadline or treat the headless characterization as browser acceptance.
 
+Endpoint admission closure (`closed`) is distinct from the public `settled`
+cleanup receipt. Disposal aborts immediately and joins all host upload read
+continuations and the stream source's cancel promise; source failures reject the
+receipt and unresolved cancellation keeps it pending. Response cancellation also
+returns that join. The endpoint retains failed receipts through disposal, including
+requests finished before listener closure. Owners must join `settled`, not infer
+cleanup from `closed` or PID disappearance. `scripts/test-endpoint-cleanup.mjs`
+uses real Web Streams/MessagePorts with a transport fixture; it does not qualify
+kernel/OPFS ownership release or live TODO requests. No worker ABI changed.
+
 This document explains how Vivari works end to end: the core constraint it
 solves, the worker topology, the syscall protocol, the filesystem, the process
 model, the Node runtime, networking, native code, and the build. It is the
