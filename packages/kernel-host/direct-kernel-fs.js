@@ -64,5 +64,6 @@ export function createDirectKernelFs(server, depCache = null) {
       return depCache ? depCache.importArchive(key, archive, aliases, { shipped: true }) : null;
     },
     setBodyConsumedHandler(fn) { server.onBodyConsumed = fn; },
+    setUnlinkHandler(fn) { server.onUnlink = fn; },
   };
 }

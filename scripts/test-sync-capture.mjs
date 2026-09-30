@@ -1,7 +1,7 @@
 // Exact large/binary synchronous child contract over real guest SABs/FS ports.
 import assert from "node:assert/strict";
 import { bootSpikeKernel, writeProject } from "./lib/spike-harness.mjs";
-import { makeViews, SAB_BYTES, DATA_BYTES, I_STATE, I_RES_LEN, STATE_REQUEST, STATE_RESPONSE_OK, STATE_RESPONSE_ERR, decodeBytes } from "../packages/protocol/syscall.js";
+import { makeViews, SAB_BYTES, DATA_BYTES, I_STATE, I_RES_LEN, STATE_REQUEST, STATE_RESPONSE_OK, STATE_RESPONSE_ERR, OP_OPEN, decodeBytes } from "../packages/protocol/syscall.js";
 
 const deadline = setTimeout(() => { console.error("FAIL sync capture deadline"); process.exit(1); }, 30000);
 const h = await bootSpikeKernel();
@@ -43,12 +43,20 @@ if(out.length!==1048583)throw Error('execSync child output truncated '+out.lengt
 for(let i=0;i<out.length;i++)if(out[i]!==i%251)throw Error('execSync child byte corruption');
 console.log(JSON.stringify({execSync:true,bytes:out.length,childLink:fs.readlinkSync('/workspace/child-sync/link')}));`,
     "fault.cjs": `const r=require('child_process').spawnSync('node',['/workspace/binary.cjs','1048583'],{maxBuffer:2097152});if(r.error?.code!=='EINVAL')throw Error('publication failure did not settle');console.log('fault-released');`,
+    "live-cleanup.cjs": `const cp=require('child_process'),fs=require('fs');
+const run=()=>cp.spawnSync('node',['/workspace/binary.cjs','800000','both'],{maxBuffer:2097152});
+const first=run();if(!first.error)throw Error('expected initial read fault');fs.writeFileSync('/workspace/initial-ready','ok');
+const wait=(path,done)=>{const t=setInterval(()=>{if(!fs.existsSync(path))return;clearInterval(t);done();},10);};
+wait('/workspace/release-faults',()=>{for(let i=0;i<4;i++){const r=run();if(r.error?.code!=='EINVAL')throw Error('expected staging fault');}fs.writeFileSync('/workspace/faults-ready','ok');
+wait('/workspace/release-success',()=>{const r=run();if(r.error||r.status!==0||r.stdout.length!==800000||r.stderr.length!==800000)throw Error('success capture');fs.writeFileSync('/workspace/success-ready','ok');
+wait('/workspace/release-exit',()=>console.log('live-cleanup-ok'));});});`,
   });
   for (const entry of ["parent.cjs", "original.cjs"]) {
     const res = await h.kernel.start("node", ["/workspace/" + entry], { cwd: "/workspace", capture: true, env: entry === "original.cjs" ? { VV_BYTE_STDIO: "1" } : {} });
     assert.equal(res.code, 0, res.stderr);
     assert.match(res.stdout, entry === "parent.cjs" ? /capture-boundaries-ok/ : /"execSync":true,"bytes":1048583/);
     assert.equal(h.filesystem.server.clients.size, 0);
+    assert.equal(h.kernel.spawnOutputOwners.size, 0);
     assert.deepEqual(h.kernel.readdir("/var/run/vv-spawn"), []);
   }
   // Fail the SECOND spill write from the deferred child-exit callback. The first
@@ -65,6 +73,61 @@ console.log(JSON.stringify({execSync:true,bytes:out.length,childLink:fs.readlink
     assert.ok(h.kernel.diagnostics().syscallTrace.events.some(e => e.phase === "kernel-dispatch-error" && e.dispatchedOpcode === 20));
     assert.deepEqual(h.kernel.readdir("/var/run/vv-spawn"), []);
   } finally { h.kernel.writeFile = writeFile; }
+  // Keep ONE real parent alive across four caught staging faults and a successful
+  // capture. A prior invocation's unread stderr spill must survive all rollbacks.
+  const waitFile = async path => {
+    while (!h.kernel.exists(path)) await new Promise(resolve => setTimeout(resolve, 10));
+  };
+  const server = h.filesystem.server;
+  const dispatch = server.dispatch;
+  let readFault = true;
+  server.dispatch = function(opcode, flags, fields, clientId) {
+    if (readFault && opcode === OP_OPEN && decodeBytes(fields[0]).startsWith('/var/run/vv-spawn/') && decodeBytes(fields[0]).endsWith('stdout.bin')) {
+      readFault = false;
+      throw new Error('injected-spill-read-fault');
+    }
+    return dispatch.call(this, opcode, flags, fields, clientId);
+  };
+  try {
+    const result = h.kernel.start('node', ['/workspace/live-cleanup.cjs'], { cwd: '/workspace', capture: true });
+    await waitFile('/workspace/initial-ready');
+    server.dispatch = dispatch;
+    const [parent] = h.kernel.procs.values();
+    const [previousPath] = parent.spawnOutputPaths;
+    assert.ok(previousPath.endsWith('stderr.bin'));
+    assert.equal(parent.spawnOutputPaths.size, 1);
+    const previousBytes = h.kernel.readFileBytes(previousPath);
+    assert.equal(previousBytes.length, 800000);
+    h.kernel.writeFile = function(path, contents) {
+      if (path.startsWith('/var/run/vv-spawn/') && path.endsWith('stderr.bin')) throw new Error('repeated-stage-fault');
+      return writeFile.call(this, path, contents);
+    };
+    h.kernel.writeFile('/workspace/release-faults', 'ok');
+    await waitFile('/workspace/faults-ready');
+    assert.ok(h.kernel.procs.has(parent.pid), 'parent remains live after four caught errors');
+    assert.deepEqual([...parent.spawnOutputPaths], [previousPath], 'rollback preserves only the earlier invocation');
+    assert.deepEqual([...h.kernel.spawnOutputOwners.keys()], [previousPath]);
+    assert.equal(h.kernel.diagnostics().spawnCapture.ownedSpills, 1);
+    assert.equal(h.kernel.diagnostics().procs.find(p => p.pid === parent.pid).ownedSpawnSpills, 1);
+    assert.deepEqual(h.kernel.readdir('/var/run/vv-spawn'), [previousPath.split('/').at(-1)]);
+    assert.deepEqual(h.kernel.readFileBytes(previousPath), previousBytes);
+    h.kernel.writeFile = writeFile;
+    h.kernel.writeFile('/workspace/release-success', 'ok');
+    await waitFile('/workspace/success-ready');
+    assert.ok(h.kernel.procs.has(parent.pid), 'successful read/unlink is observed before parent exit');
+    assert.deepEqual([...parent.spawnOutputPaths], [previousPath], 'success removes its own ownership records');
+    assert.deepEqual([...h.kernel.spawnOutputOwners.keys()], [previousPath]);
+    assert.deepEqual(h.kernel.readdir('/var/run/vv-spawn'), [previousPath.split('/').at(-1)]);
+    h.kernel.writeFile('/workspace/release-exit', 'ok');
+    const completed = await result;
+    assert.equal(completed.code, 0, completed.stderr);
+    assert.match(completed.stdout, /live-cleanup-ok/);
+    assert.equal(h.kernel.spawnOutputOwners.size, 0);
+    assert.equal(h.kernel.diagnostics().spawnCapture.ownedSpills, 0);
+    assert.deepEqual(h.kernel.readdir('/var/run/vv-spawn'), []);
+    h.kernel.releaseSpawnOutput(previousPath); // duplicate receipt is harmless
+    assert.equal(h.kernel.spawnOutputOwners.size, 0);
+  } finally { server.dispatch = dispatch; h.kernel.writeFile = writeFile; }
   const respondOk = h.kernel.respondOk;
   h.kernel.respondOk = function(proc, bytes) {
     if (proc.spawnOutputPaths?.size) {
@@ -77,11 +140,12 @@ console.log(JSON.stringify({execSync:true,bytes:out.length,childLink:fs.readlink
     const res = await h.kernel.start("node", ["/workspace/fault.cjs"], { cwd: "/workspace", capture: true });
     assert.equal(res.signal, "SIGKILL");
     assert.equal(h.filesystem.server.clients.size, 0);
+    assert.equal(h.kernel.spawnOutputOwners.size, 0);
     assert.deepEqual(h.kernel.readdir("/var/run/vv-spawn"), []);
   } finally { h.kernel.respondOk = respondOk; }
 } finally {
   for (const pid of [...h.kernel.procs.keys()]) h.kernel.signal(pid, "SIGKILL");
   clearTimeout(deadline);
 }
-console.log("PASS exact original execSync binary >1MiB, inline/spill boundaries, both streams, maxBuffer errors, deferred fault release and cleanup");
+console.log("PASS original binary execSync, capture boundaries/errors, repeated live-parent rollback, successful unlink receipts, unrelated spill preservation and exit cleanup");
 process.exit(0);

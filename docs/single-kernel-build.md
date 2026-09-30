@@ -152,3 +152,27 @@ Repair verification: `node scripts/test-sync-capture.mjs`,
 `node scripts/test-single-kernel-review.mjs`, full `node scripts/verify-node.mjs`,
 and `bunx tsc -p packages/core/tsconfig.build.json --noEmit`: PASS. Actual Chrome
 repair acceptance is still required after the coordinated rebuild.
+
+### Follow-up ownership cleanup (fresh rebuild required)
+
+Frozen `f545699` remains integration-owned. Its second-spill-write failure could
+leave the first staged file inaccessible to a guest that only received an errno;
+repeated caught errors retained files until parent exit. Successful read/unlink
+also left stale entries in the parent's ownership set. The follow-up tracks exact
+minted paths, rolls back only the current failed staging invocation before
+publishing its error, and consumes ownership on successful FsServer unlink via
+the direct kernel facade. Existing parent-exit cleanup remains the backstop.
+`spawnCapture.ownedSpills` and per-process `ownedSpawnSpills` expose live counters.
+
+The regression keeps the same real parent alive through four caught second-write
+faults (800,000-byte stdout each), preserves an earlier invocation's unread stderr
+spill, and proves no new files/records accumulate. It then performs a successful
+spill read/unlink while the parent is still alive and checks its records disappear,
+before proving exit reclaims the one earlier unread spill. No generated output or
+frozen browser artifact is changed; final integration cleanup must recheck the
+fresh source checkpoint after a parent-coordinated matching-bundle rebuild.
+
+Follow-up verification: extended `test-sync-capture`, `test-single-kernel`,
+`test-single-kernel-routing`, `test-single-kernel-review`, full `verify-node`,
+core `tsc --noEmit`, and `git diff --check`: PASS. Browser checks of this follow-up
+remain separate from integration's frozen `f545699` results.

@@ -372,6 +372,7 @@ export class FsServer {
       case OP_UNLINK: {
         const path = s(0);
         vfs.unlink(path);
+        this.onUnlink?.(path);
         if (p) p.onDelete(path);
         this.notifyWatch(path, "rename");
         return EMPTY;

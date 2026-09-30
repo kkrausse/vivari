@@ -22,6 +22,9 @@ Ship OP_SPAWN's kernel/guest JSON metadata together. `test:sync-capture` exercis
 the exact binary >1MiB Chrome fixture, inline/spill/maxBuffer boundaries, deferred
 publication failure release, and parent-owned spill cleanup. An exit callback is
 outside serviceSyscall's promise guard; always explicitly guard its publication.
+Staging failures must roll back their own files before errno publication, not wait
+for parent exit. Successful unlink is the spill ownership consumption receipt;
+the long-lived parent's record must be removed too. Never sweep other invocations.
 
 Run `test:single-kernel-review` for the ownership/body-lifetime regressions. An
 oversized whole-file SAB response is NOT a consumed fetch body: retain its pin

@@ -1,5 +1,19 @@
 # Vivari — Roadmap
 
+## Immediate synchronous spill rollback and ownership receipts — 2026-09-30
+
+Review of frozen `f545699` found second-file staging failure left an unreachable
+stdout file until parent exit; four caught failures in one parent retained four
+files. Successful guest unlink also left stale ownership strings. Roll back only
+the failed invocation's staged paths before error publication. Track exact minted
+path ownership and release it on successful shared FsServer unlink, including guest
+and direct kernel mutations. Duplicate receipts are no-ops. Extend the real-guest
+capture regression to keep one parent alive through four failed staging attempts,
+preserve an earlier unread stderr spill from another invocation, then verify a
+successful capture clears its own records before exit. Parent-exit cleanup still
+reclaims the earlier unread file. Frozen integration/browser artifacts are not
+rebuilt or touched; parent owns a subsequent committed-source rebuild.
+
 ## Causal synchronous child capture repair — 2026-09-30
 
 New Chrome routing evidence at `3e390d4` passes all three tiny spawn modes, then

@@ -265,6 +265,10 @@ export class Kernel {
     if (this.fs && typeof this.fs.setBodyConsumedHandler === "function") {
       this.fs.setBodyConsumedHandler((path) => this.releaseFetchBody(path));
     }
+    // Successful guest/direct unlink is the consumption receipt. Track exact
+    // minted paths, not a guest-supplied PID parsed from a pathname.
+    this.spawnOutputOwners = new Map();
+    this.fs?.setUnlinkHandler?.((path) => this.releaseSpawnOutput(path));
 
     // ---- async fetch: parallel downloads (OP_FETCH_ASYNC) ----
     // The real npm/yarn/pnpm issue many registry requests at once, but its Agent
@@ -908,6 +912,7 @@ export class Kernel {
         sinceSyscallMs: now - p.lastActivity,
         syscalls: p.syscalls,
         syscallControl: sampleSyscallControl(p.ctrl),
+        ownedSpawnSpills: p.spawnOutputPaths.size,
         // Uncaught errors inside the worker: NOT deaths, but a flood of them is a
         // strong hint (see handleWorkerError).
         workerErrors: p.workerErrors,
@@ -927,6 +932,7 @@ export class Kernel {
       listeners: [...this.listeners.keys()],
       pendingHttp: this.pendingHttp ? this.pendingHttp.size : 0,
       syscallTrace: this.syscallTrace.snapshot(),
+      spawnCapture: { ownedSpills: this.spawnOutputOwners.size },
     };
   }
 
@@ -976,6 +982,7 @@ export class Kernel {
     this._releaseFetchBodiesForPid(pid);
     for (const path of proc.spawnOutputPaths) {
       try { this.unlink(path); } catch { /* already consumed by the parent */ }
+      finally { this.releaseSpawnOutput(path); }
     }
     proc.spawnOutputPaths.clear();
     // Drop any ports this process was serving and fail its in-flight requests,
@@ -1701,6 +1708,7 @@ export class Kernel {
     this.procs.get(childPid).onExit = (res) => {
       if (!this.procs.has(parent.pid) || parent.finalized) return;
       this.syscallTrace.record(parent.pid, "spawn-child-exit", parent.ctrl, { childPid });
+      const stagedPaths = [];
       // This callback runs from a later worker message, outside serviceSyscall's
       // async error guard. Publication/staging failures must still release parent.
       try {
@@ -1718,7 +1726,9 @@ export class Kernel {
           this.mkdirp("/var/run/vv-spawn");
           for (const [index, stream] of ["stdout", "stderr"].entries()) {
             const path = `/var/run/vv-spawn/${parent.pid}-${childPid}-${stream}.bin`;
+            stagedPaths.push(path);
             parent.spawnOutputPaths.add(path);
+            this.spawnOutputOwners.set(path, parent.pid);
             this.writeFile(path, output[index]);
             result[stream + "Path"] = path;
           }
@@ -1726,6 +1736,12 @@ export class Kernel {
         }
         this.respondOk(parent, response);
       } catch (err) {
+        // No paths were published to the guest. Roll back just this invocation,
+        // before errno publication, including a partially completed write.
+        for (const path of stagedPaths) {
+          try { this.unlink(path); } catch { /* absent/partially staged */ }
+          finally { this.releaseSpawnOutput(path); }
+        }
         this.failSyscall(parent, OP_SPAWN, err);
       }
     };
@@ -1780,6 +1796,14 @@ export class Kernel {
       }
     };
     this.respondOk(parent, encodeString(JSON.stringify({ pid: childPid })));
+  }
+
+  // Idempotent receipt for a path this kernel actually staged.
+  releaseSpawnOutput(path) {
+    const pid = this.spawnOutputOwners.get(path);
+    if (pid === undefined) return;
+    this.spawnOutputOwners.delete(path);
+    this.procs.get(pid)?.spawnOutputPaths.delete(path);
   }
 
   // ---- blocking stdin (OP_READ_STDIN) ----------------------------------------

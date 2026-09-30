@@ -102,6 +102,13 @@ Overflow beyond maxBuffer settles with ENOBUFS, partial bytes and SIGTERM metada
 generic oversized SAB publication settles EFBIG. Deferred spawn-exit encoding/
 staging errors pass through failSyscall rather than leaving a parked parent.
 
+Spill staging failure rolls back only that invocation's minted paths before
+publishing its errno. A successful FsServer unlink reports an idempotent receipt
+through the direct-kernel-fs adapter, deleting the exact path's ownership index
+and its parent's ownership record. This is not a guest-supplied PID/ack and does
+not remove another invocation's unread spill. Host diagnostics expose
+`spawnCapture.ownedSpills` and `procs[].ownedSpawnSpills` for cleanup checks.
+
 This document explains how Vivari works end to end: the core constraint it
 solves, the worker topology, the syscall protocol, the filesystem, the process
 model, the Node runtime, networking, native code, and the build. It is the
