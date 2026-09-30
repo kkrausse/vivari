@@ -1,5 +1,15 @@
 # Vivari — Roadmap
 
+## Clean kernel-fs completion candidate — 2026-09-29
+
+Starting from pinned e998de62, carry only the completion predicate and the
+deterministic `test:kernel-fs-completion` regression; no deletion diagnostics.
+A previous response notification can wake the next unfinished request. Match
+the existing process-client predicate before consuming metadata or errno bytes,
+without reissuing any operation. The forced schedule proves a source defect,
+not attribution of a retained natural browser failure. Newline readdir framing
+is unchanged. Isolated browser qualification is not production promotion.
+
 ## Symlink-safe recursive deletion — 2026-09-22 UTC
 
 Kernel recursive removal now classifies each directory entry with `lstat` rather

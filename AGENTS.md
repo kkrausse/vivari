@@ -357,6 +357,16 @@ README.md · roadmap.md · research.md · ARCHITECTURE.md · AGENTS.md
 
 ## Critical gotchas (these have bitten us repeatedly)
 
+### SAB notifications are not response completion
+The caller can observe RESPONSE_OK before its notification executes, consume the
+response and publish its next request. That previous notification can then wake
+the next request while STATE is still REQUEST. Kernel and process clients must
+re-check the state predicate after every wake before reading RES_LEN or payload.
+`bun run test:kernel-fs-completion` selects this interleaving with real workers and
+atomic handshakes, covering metadata and errno plus the process-client control.
+This is not an operation retry, nor evidence attributing a particular browser
+failure to the schedule. Newline-delimited readdir framing is a separate defect.
+
 ### Recursive removal must classify entries with `lstat`, not `stat`
 `stat` follows a trailing symlink. A recursive remover that uses it can walk out
 of the requested subtree through a directory symlink, erase the target's

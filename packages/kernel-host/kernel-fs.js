@@ -66,7 +66,12 @@ export function createKernelFs(fsWorker) {
     Atomics.store(ctrl, I_REQ_LEN, request.length);
     Atomics.store(ctrl, I_STATE, STATE_REQUEST);
     fsWorker.postMessage({ type: "fs", client: KERNEL_CLIENT }); // ring the doorbell
-    Atomics.wait(ctrl, I_STATE, STATE_REQUEST);
+    // A previous response's notify can arrive after we consume that response
+    // and publish this request. Notification is only a wakeup, not completion.
+    // Match the process client's predicate wait before reading response bytes.
+    do {
+      Atomics.wait(ctrl, I_STATE, STATE_REQUEST);
+    } while (Atomics.load(ctrl, I_STATE) === STATE_REQUEST);
     const state = Atomics.load(ctrl, I_STATE);
     const payload = data.slice(0, Atomics.load(ctrl, I_RES_LEN));
     if (state === STATE_RESPONSE_ERR) {

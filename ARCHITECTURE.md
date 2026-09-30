@@ -130,6 +130,18 @@ control[5] = reserved (8-byte data alignment)
 STATE values: `IDLE=0`, `REQUEST=1` (worker→servicer), `RESPONSE_OK=2`,
 `RESPONSE_ERR=3` (a UTF-8 errno like `ENOENT`).
 
+Completion is the state predicate, not the notification. A servicer publishes
+payload and RES_LEN, stores RESPONSE_OK/ERR, then notifies. The caller may consume
+that published response before the notification runs and submit its next request;
+the previous notification can wake that next request while it is still REQUEST.
+Both kernel-fs and process fs-client therefore wait again while STATE is REQUEST,
+without reissuing the operation or interpreting unfinished response bytes. The
+wire layout, doorbells and response publication order remain unchanged. The
+deterministic `test:kernel-fs-completion` contract uses the shipped clients and
+FsServer in real Node workers, delaying the first notification until the next
+request parks; metadata and errno must survive that wake. It uses injected VFS
+methods, not Wasm or OPFS, and is not browser qualification.
+
 The integration candidate retains upstream stdin/metadata opcodes 34–38 and
 adds FS-owner SQLite at opcode 39. Toolkit delivery identifies this combination
 as `workspace-v2-sab6-sqlite39`; the host rejects older ABI manifests and missing
