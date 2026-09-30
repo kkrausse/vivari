@@ -60,18 +60,19 @@ export async function launch(host: Host, options: NodeLaunchOptions, binding: Re
   const accepted = new Promise<void>((resolve, reject) => { resolveStart = resolve; rejectStart = reject; });
   const stop = async () => {
     if (!done && !stopped) { stopped = true; host.post("proc-kill", { execId }); }
-    await exited;
+    const result = await exited;
+    if (result.cleanupError) throw new WorkspaceError("CLEANUP_FAILED", result.cleanupError);
   };
-  const overflow = () => { void stop(); };
+  const overflow = () => { void stop().catch(() => {}); };
   const stdout = new ByteQueue(overflow, 1048576, n => { Atomics.sub(credits, 0, n); });
   const stderr = new ByteQueue(overflow, 1048576, n => { Atomics.sub(credits, 1, n); });
-  const abort = () => { void stop(); };
+  const abort = () => { void stop().catch(() => {}); };
   const off = host.on(m => {
     if (m.type === "host-error") {
       const error = new Error(String(m.error));
       done = true; off(); stdout.end(error); stderr.end(error); rejectStart(error);
       options.signal?.removeEventListener("abort", abort);
-      resolveExit({ exitCode: 143, signal: "SIGTERM", forced: true });
+      resolveExit({ exitCode: 143, signal: "SIGTERM", forced: true, cleanupError: String(m.error) });
       return;
     }
     if (m.execId !== execId) return;
@@ -91,7 +92,7 @@ export async function launch(host: Host, options: NodeLaunchOptions, binding: Re
       done = true; off(); options.signal?.removeEventListener("abort", abort);
       stdout.end(); stderr.end();
       if (!started) rejectStart(new WorkspaceError("LAUNCH_REJECTED", String(m.error ?? "Launch failed")));
-      resolveExit({ exitCode: Number(m.code), signal: m.signal ? String(m.signal) : null, forced: !!m.signal });
+      resolveExit({ exitCode: Number(m.code), signal: m.signal ? String(m.signal) : null, forced: !!m.signal, ...(m.cleanupError ? { cleanupError: String(m.cleanupError) } : {}) });
     }
   });
   options.signal?.addEventListener("abort", abort, { once: true });

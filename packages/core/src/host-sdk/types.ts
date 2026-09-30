@@ -29,7 +29,7 @@ export interface NodeLaunchOptions {
 export interface Execution {
   readonly stdout: AsyncIterable<Uint8Array>;
   readonly stderr: AsyncIterable<Uint8Array>;
-  readonly exited: Promise<{ exitCode: number; signal: string | null; forced: boolean }>;
+  readonly exited: Promise<{ exitCode: number; signal: string | null; forced: boolean; cleanupError?: string }>;
   writeStdin(bytes: Uint8Array): void;
   closeStdin(): void;
   stop(): Promise<void>;
@@ -51,7 +51,7 @@ export interface Endpoint {
   dispose(): void;
 }
 export type ErrorCode = "ENTRY_NOT_FOUND" | "LAUNCH_REJECTED" | "BACKEND_UNAVAILABLE"
-  | "CLOSED" | "ATTACHED" | "STORAGE_BUSY" | "UNSUPPORTED_WORKSPACE"
+  | "CLOSED" | "ATTACHED" | "STORAGE_BUSY" | "UNSUPPORTED_WORKSPACE" | "CLEANUP_FAILED"
   | "DISTRIBUTION_MISMATCH" | "OUTPUT_OVERFLOW" | "TOOL_FAILED";
 export class WorkspaceError extends Error {
   readonly code: ErrorCode;

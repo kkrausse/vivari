@@ -58,6 +58,10 @@ try {
   const kernel = new Kernel({ fs: filesystem.fs, spawnWorker: () => { throw new Error("unused"); },
     fetcher: async () => ({ ok: true, status: 200, headers: {}, body }) });
   kernel.fetchCacheMaxBytes = 0;
+  // These controlled reader PIDs own the two private fixture requests. Admission
+  // no longer accepts a PID absent from the process table.
+  kernel.procs.set(77, { pid: 77 });
+  kernel.procs.set(78, { pid: 78 });
   const result = await kernel._fetchIntoVfs(77, { url: "https://example.test/oversized-body" });
   await kernel._fetchIntoVfs(78, { url: "https://example.test/evict-previous" });
   assert.ok(kernel._fetchBodyOrphans.has(result.path), "zero cache cap evicts pinned body");

@@ -140,6 +140,7 @@ export async function doFetch(url, init) {
     // (S3 and friends) actually carry their credentials. See egress-header-policy.
     if (init.headers) opts.headers = egressHeaders(rewrite(url), init.headers, self.location && self.location.origin);
     if (init.body) opts.body = init.body;
+    if (init.signal) opts.signal = init.signal;
   }
 
   // Transparent wasm drop-in: serve the target's packument under the source name
@@ -155,13 +156,18 @@ export async function doFetch(url, init) {
           // list + dist-tags) and the target packument (for the tarball + deps),
           // then synthesize a source-named packument whose ranges resolve but whose
           // tarballs are the target's. Requires both fetches to succeed.
-          const [srcRes, dstRes] = await Promise.all([fetch(rewrite(url), opts), fetch(rewrite(alias.targetUrl), opts)]);
+          // Each branch includes body consumption. allSettled joins the sibling
+          // even if abort/failure rejects the other branch first.
+          const results = await Promise.allSettled([readResponse(rewrite(url), opts), readResponse(rewrite(alias.targetUrl), opts)]);
+          const failure = results.find(result => result.status === "rejected");
+          if (failure) throw failure.reason;
+          const [srcRes, dstRes] = results.map(result => result.value);
           if (srcRes.ok && dstRes.ok) {
-            const json = synthesizeRemappedPackument(await srcRes.json(), await dstRes.json(), alias.src);
+            const json = synthesizeRemappedPackument(JSON.parse(new TextDecoder().decode(srcRes.body)), JSON.parse(new TextDecoder().decode(dstRes.body)), alias.src);
             if (json) {
               const body = new TextEncoder().encode(JSON.stringify(json)).buffer;
               const headers = {};
-              for (const [k, v] of dstRes.headers) headers[k] = v;
+              Object.assign(headers, dstRes.headers);
               headers["content-type"] = "application/json";
               delete headers["content-length"]; // synthesized body length differs
               delete headers["content-encoding"]; // we return decoded JSON bytes
@@ -169,12 +175,12 @@ export async function doFetch(url, init) {
             }
           }
         } else {
-          const res = await fetch(rewrite(alias.targetUrl), opts);
+          const res = await readResponse(rewrite(alias.targetUrl), opts);
           if (res.ok) {
-            const json = rewritePackument(await res.json(), alias.src);
+            const json = rewritePackument(JSON.parse(new TextDecoder().decode(res.body)), alias.src);
             const body = new TextEncoder().encode(JSON.stringify(json)).buffer;
             const headers = {};
-            for (const [k, v] of res.headers) headers[k] = v;
+            Object.assign(headers, res.headers);
             headers["content-type"] = "application/json";
             delete headers["content-length"]; // body length changed after rewrite
             delete headers["content-encoding"]; // we return decoded JSON bytes
@@ -182,12 +188,19 @@ export async function doFetch(url, init) {
           }
         }
       } catch {
+        opts.signal?.throwIfAborted();
         // Network/parse failure — fall back to the un-aliased fetch below.
       }
     }
   }
 
-  const res = await fetch(rewrite(url), opts);
+  return readResponse(rewrite(url), opts);
+}
+
+// Returning this promise means native fetch AND its body read have settled. No
+// Promise.race/abort-only receipt can detach a still-running backend continuation.
+async function readResponse(url, opts) {
+  const res = await fetch(url, opts);
   const buf = await res.arrayBuffer();
   const headers = {};
   for (const [k, v] of res.headers) headers[k] = v;

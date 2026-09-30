@@ -1698,7 +1698,7 @@ async function boot() {
       // `error` is set only when the process died of a worker fault rather than
       // exiting, so an SDK consumer can tell "the program failed" from "the VM lost
       // the program". The other proc-exit sites already carry this field.
-      post("proc-exit", { execId: eid, code: res.code, signal: res.signal, ...(res.error ? { error: res.error } : {}) });
+      post("proc-exit", { execId: eid, code: res.code, signal: res.signal, ...(res.error ? { error: res.error } : {}), ...(res.cleanupError ? { cleanupError: res.cleanupError } : {}) });
       return;
     }
     const tid = termByPid.get(pid);

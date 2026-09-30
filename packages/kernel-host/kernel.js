@@ -281,6 +281,8 @@ export class Kernel {
     this._fetchActive = 0;
     this._fetchQueue = [];
     this._fetchInflight = new Map(); // cacheKey -> Promise<meta> (network in flight)
+    this._fetchOperations = new Map(); // promise -> shared backend and live PID interests
+    this._processCleanup = new Map(); // pending/failed per-process cleanup receipts
 
     // ---- lazy (on-demand) programs -------------------------------------------
     // Some tools are HUGE (the real TypeScript 7 `tsgo` is a ~47 MB wasm; yarn/
@@ -938,8 +940,21 @@ export class Kernel {
 
   finalize(pid, code, signal = null, error = null) {
     const proc = this.procs.get(pid);
-    if (!proc || proc.finalized) return;
+    if (!proc || proc.finalized) return this._processCleanup.get(pid);
     proc.finalized = true;
+    const joins = [...(proc.fetchTasks || [])];
+    // A child may have left the PID table while its egress receipt is pending.
+    // Keep that subtree interest even when native child death preceded this stop.
+    for (const cleanup of this._processCleanup.values()) {
+      if (cleanup.parentPid === pid) joins.push(cleanup);
+    }
+    for (const operation of this._fetchOperations.values()) {
+      operation.owners.delete(pid);
+      if (!operation.owners.size) {
+        operation.controller.abort();
+        operation.cancelQueued?.();
+      }
+    }
     // However we got here — the process exited on its own, a grace window ran
     // out, something killed it outright — any armed grace timer is now moot.
     if (proc.graceTimer != null) {
@@ -956,7 +971,8 @@ export class Kernel {
     // exit there are no live children here; this only bites on an actual kill.
     for (const [cpid, cproc] of this.procs) {
       if (cproc.parentPid === pid && !cproc.finalized) {
-        this.finalize(cpid, signal === "SIGKILL" ? 137 : 143, signal || "SIGTERM");
+        const childCleanup = this.finalize(cpid, signal === "SIGKILL" ? 137 : 143, signal || "SIGTERM");
+        if (childCleanup) joins.push(childCleanup);
       }
     }
     try {
@@ -979,7 +995,7 @@ export class Kernel {
     }
     // Any fetched body this process was handed but never read would otherwise stay
     // pinned for the rest of the session.
-    this._releaseFetchBodiesForPid(pid);
+    joins.push(...this._releaseFetchBodiesForPid(pid));
     for (const path of proc.spawnOutputPaths) {
       try { this.unlink(path); } catch { /* already consumed by the parent */ }
       finally { this.releaseSpawnOutput(path); }
@@ -1064,9 +1080,28 @@ export class Kernel {
     // A worker fault goes to onError when a caller asked for one (start()), so it can
     // reject rather than look like a clean non-zero exit. Everything else — and every
     // caller that only wired onExit — settles exactly as before.
-    if (error && proc.onError) proc.onError(result);
-    else if (proc.onExit) proc.onExit(result);
-    if (this.onProcExit) this.onProcExit(pid, result);
+    const publishExit = () => {
+      if (error && proc.onError) proc.onError(result);
+      else if (proc.onExit) proc.onExit(result);
+      if (this.onProcExit) this.onProcExit(pid, result);
+    };
+    // Native PID death closes admission above. The public receipt additionally joins
+    // OP_FETCH continuations (including body writes and publication), not a counter
+    // sample or Abort dispatch. Yield so backend/guest callbacks can make progress.
+    if (joins.length) {
+      const cleanup = Promise.allSettled(joins).then(outcomes => {
+        const failed = outcomes.find(outcome => outcome.status === "rejected");
+        if (failed) result.cleanupError = String(failed.reason?.message || failed.reason);
+        publishExit();
+        if (failed) throw failed.reason;
+      });
+      cleanup.parentPid = proc.parentPid;
+      this._processCleanup.set(pid, cleanup);
+      cleanup.then(() => this._processCleanup.delete(pid), () => {});
+      if (!this.procs.size) this._stopStallWatchdog();
+      return cleanup;
+    }
+    publishExit();
     if (!this.procs.size) this._stopStallWatchdog();
   }
 
@@ -1115,7 +1150,7 @@ export class Kernel {
 
   /** Stop a running process: terminate its worker + release its ports. */
   stop(pid) {
-    if (this.procs.has(pid)) this.finalize(pid, 143, "SIGTERM");
+    return this.finalize(pid, 143, "SIGTERM");
   }
 
   /** Start a top-level process; resolves with { pid, code, stdout, stderr }. */
@@ -2108,7 +2143,7 @@ export class Kernel {
   // `releaseFetchBody` is called by the FS layer once a read of that path has
   // finished (fd closed, or a whole-file read serviced). See fs-server.js.
   _pinFetchBody(path, pid) {
-    if (!path) return;
+    if (!path || !this.procs.has(pid)) return;
     const pins = this._fetchBodyPins.get(path);
     if (pins) pins.push(pid | 0);
     else this._fetchBodyPins.set(path, [pid | 0]);
@@ -2133,27 +2168,37 @@ export class Kernel {
   // was handed, which would pin it forever. Its references go when it does, so a
   // missing or unwired release signal can never leak past the process's lifetime.
   _releaseFetchBodiesForPid(pid) {
-    if (!this._fetchBodyPins.size) return;
+    const cleanup = [];
+    if (!this._fetchBodyPins.size) return cleanup;
     for (const [path, pins] of this._fetchBodyPins) {
       const kept = pins.filter((p) => p !== pid);
       if (kept.length === pins.length) continue;
       if (kept.length) this._fetchBodyPins.set(path, kept);
       else {
         this._fetchBodyPins.delete(path);
-        this._reapFetchBody(path);
+        try {
+          const receipt = this._reapFetchBody(path, true);
+          if (receipt?.then) cleanup.push(receipt);
+        } catch (error) { cleanup.push(Promise.reject(error)); }
       }
     }
+    return cleanup;
   }
 
   // Unlink a now-unpinned body, but only if eviction already dropped its accounting.
   // Still-cached bodies stay on disk for a future hit until they are evicted.
-  _reapFetchBody(path) {
-    if (!this._fetchBodyOrphans.delete(path)) return;
+  _reapFetchBody(path, strict = false) {
+    if (!this._fetchBodyOrphans.has(path)) return;
+    const complete = () => this._fetchBodyOrphans.delete(path);
+    const failed = error => {
+      if (error?.code === "ENOENT" || error?.message === "ENOENT") { complete(); return; }
+      if (strict) throw error;
+    };
     try {
-      this.fs.unlink(path);
-    } catch {
-      /* already gone */
-    }
+      const receipt = this.fs.unlink(path);
+      if (receipt?.then) return receipt.then(complete, failed);
+      complete();
+    } catch (error) { failed(error); }
   }
 
   _fetchCacheKey(method, url, headers) {
@@ -2164,9 +2209,16 @@ export class Kernel {
   // Run at most `fetchConcurrency` outbound requests at once; queue the rest.
   // `task` is a () => Promise thunk that does one network fetch; the returned
   // promise settles with the task's result once a slot frees up and it runs.
-  _scheduleFetch(task) {
+  _scheduleFetch(task, operation) {
     return new Promise((resolve, reject) => {
-      this._fetchQueue.push({ task, resolve, reject });
+      const entry = { task, resolve, reject };
+      if (operation) operation.cancelQueued = () => {
+        const index = this._fetchQueue.indexOf(entry);
+        if (index < 0) return;
+        this._fetchQueue.splice(index, 1);
+        reject(new Error("ECANCELED"));
+      };
+      this._fetchQueue.push(entry);
       this._drainFetchQueue();
     });
   }
@@ -2178,7 +2230,7 @@ export class Kernel {
         this._fetchActive--;
         this._drainFetchQueue();
       };
-      task().then(
+      Promise.resolve().then(task).then(
         (v) => { done(); resolve(v); },
         (e) => { done(); reject(e); },
       );
@@ -2190,6 +2242,15 @@ export class Kernel {
   // the blocking (OP_FETCH) and async (OP_FETCH_ASYNC) paths. Handles the content
   // cache, in-flight de-dupe of identical cacheable GETs, and the concurrency cap.
   async _fetchIntoVfs(pid, { url, method = "GET", headers = null, bodyB64 = null }) {
+    if (!this.procs.has(pid)) throw new Error("ECANCELED");
+    const owner = this.procs.get(pid);
+    const join = async (work, operation) => {
+      try { return await work; }
+      catch (error) {
+        if (operation.cleanupError) owner.fetchCleanupError = operation.cleanupError;
+        throw error;
+      }
+    };
     method = String(method || "GET").toUpperCase();
     // Only idempotent bodyless GETs are cached (npm re-resolving the same
     // packument). Anything with a body / non-GET always hits the network.
@@ -2213,22 +2274,37 @@ export class Kernel {
     // A burst of concurrent requests for the same packument (npm resolving the
     // same dep from several branches at once) shares ONE network op + one write.
     if (cacheable && this._fetchInflight.has(cacheKey)) {
-      const meta = await this._fetchInflight.get(cacheKey);
+      const work = this._fetchInflight.get(cacheKey);
+      const operation = this._fetchOperations.get(work);
+      // An aborted cohort cannot accept a new live owner; it must settle first.
+      if (operation.controller.signal.aborted) {
+        await work.catch(() => {});
+        return this._fetchIntoVfs(pid, { url, method, headers, bodyB64 });
+      }
+      operation.owners.add(pid);
+      const meta = await join(work, operation);
+      if (!this.procs.has(pid)) throw new Error("ECANCELED");
       // Sharers read the SAME body file, so each needs its own reference — the last
       // one to finish is what frees it.
       this._pinFetchBody(meta.path, pid);
       if (this.onFetch) this.onFetch(url, { cached: true, size: meta.size, pid });
       return { ...meta, cached: true };
     }
+    const operation = { owners: new Set([pid]), controller: new AbortController() };
     const work = this._scheduleFetch(() =>
-      this._doNetworkFetch({ url, method, headers, bodyB64, cacheKey, cacheable, pid }),
+      this._doNetworkFetch({ url, method, headers, bodyB64, cacheKey, cacheable, pid, operation }),
+      operation,
     );
+    this._fetchOperations.set(work, operation);
+    const clearOperation = () => this._fetchOperations.delete(work);
+    work.then(clearOperation, clearOperation);
     if (cacheable) {
       this._fetchInflight.set(cacheKey, work);
       const clear = () => { if (this._fetchInflight.get(cacheKey) === work) this._fetchInflight.delete(cacheKey); };
       work.then(clear, clear);
     }
-    const meta = await work;
+    const meta = await join(work, operation);
+    if (!this.procs.has(pid)) throw new Error("ECANCELED");
     this._pinFetchBody(meta.path, pid);
     return { ...meta, cached: false };
   }
@@ -2237,10 +2313,15 @@ export class Kernel {
   // stream the body into the VFS. `method`/`headers`/`bodyB64` (from the http/
   // https client shim, lib/https.js) let a real ClientRequest egress; a bare
   // `{url}` still works (GET).
-  async _doNetworkFetch({ url, method, headers, bodyB64, cacheKey, cacheable, pid }) {
-    const init = { method, headers: headers || undefined };
+  async _doNetworkFetch({ url, method, headers, bodyB64, cacheKey, cacheable, pid, operation }) {
+    const checkOwner = () => {
+      if (!operation.owners.size) throw new Error("ECANCELED");
+    };
+    checkOwner();
+    const init = { method, headers: headers || undefined, signal: operation.controller.signal };
     if (bodyB64) init.body = b64ToBytes(bodyB64);
     const res = await this.fetcher(url, init);
+    checkOwner();
     const body = res.body instanceof Uint8Array ? res.body : new Uint8Array(res.body || 0);
     const path = this._fetchCachePath(cacheKey);
     this.mkdirp("/var/cache/vv-fetch");
@@ -2271,7 +2352,21 @@ export class Kernel {
     };
     // Large body bypasses the 1 MiB SAB: hand it to the FS Worker over a
     // transferable buffer, then the process reads it back with normal fs (#14).
-    await this.fs.writeLarge(path, body);
+    try {
+      await this.fs.writeLarge(path, body);
+      checkOwner();
+    } catch (error) {
+      // A write already admitted may settle after death. Join it and reclaim only
+      // its minted generation, never a cached body another PID is consuming.
+      try { await this.fs.unlink(path); }
+      catch (cleanupError) {
+        if (cleanupError?.code !== "ENOENT" && cleanupError?.message !== "ENOENT") {
+          operation.cleanupError = cleanupError;
+          throw cleanupError;
+        }
+      }
+      throw error;
+    }
     if (cacheable) {
       this.fetchCache.set(cacheKey, meta);
       this._fetchCacheBytes += meta.size | 0;
@@ -2313,6 +2408,10 @@ export class Kernel {
   // Deferred like handleSpawn: the caller stays parked on Atomics.wait while we
   // fetch and stream the body into the VFS, then wakes with the JSON metadata.
   async handleFetch(proc, req) {
+    return this._trackProcessFetch(proc, () => this._handleFetch(proc, req));
+  }
+
+  async _handleFetch(proc, req) {
     try {
       const meta = await this._fetchIntoVfs(proc.pid, req);
       // Process may have exited while the fetch was in flight.
@@ -2333,7 +2432,7 @@ export class Kernel {
     const fetchId = req.fetchId | 0;
     // Acknowledge receipt immediately so the caller's loop keeps going.
     this.respondOk(proc, EMPTY);
-    this._fetchIntoVfs(pid, req).then(
+    this._trackProcessFetch(proc, () => this._fetchIntoVfs(pid, req).then(
       (meta) => {
         this.postToProc(pid, { type: "fetch-done", fetchId, ok: true, meta });
       },
@@ -2345,7 +2444,20 @@ export class Kernel {
           error: typeof err === "string" ? err : String(err?.message || "EFETCH"),
         });
       },
-    );
+    ));
+  }
+
+  _trackProcessFetch(proc, start) {
+    proc.fetchTasks ||= new Set();
+    // Transport failure is already reported to the live guest. Cleanup failure
+    // must instead survive as a rejected owner receipt, including after exit.
+    // Register ownership before any backend/onFetch leaf can reenter finalize.
+    const receipt = Promise.resolve().then(start).then(() => {
+      if (proc.fetchCleanupError) throw proc.fetchCleanupError;
+    });
+    proc.fetchTasks.add(receipt);
+    receipt.then(() => proc.fetchTasks.delete(receipt), () => {});
+    return receipt;
   }
 
 }

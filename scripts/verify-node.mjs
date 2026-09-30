@@ -2588,7 +2588,8 @@ setTimeout(() => { fs.writeFileSync('/stall/survived.txt', 'still here'); }, 400
   {
     const savedCap = kernel.fetchCacheMaxBytes;
     kernel.fetchCacheMaxBytes = 0;
-    const fetchBody = (url) => kernel._fetchIntoVfs(1, { url });
+    const fetchPid = [...kernel.procs.keys()].at(-1); // live busy guest from above
+    const fetchBody = (url) => kernel._fetchIntoVfs(fetchPid, { url });
 
     // A is handed out and NOT read yet; B..D evict it from the accounting.
     const a = await fetchBody("https://registry.npmjs.org/lifetime-a");
@@ -2610,7 +2611,7 @@ setTimeout(() => { fs.writeFileSync('/stall/survived.txt', 'still here'); }, 400
     // Two readers of one body (what in-flight de-dupe produces): the FIRST read
     // must not pull the file out from under the second.
     const e = await fetchBody("https://registry.npmjs.org/lifetime-e");
-    kernel._pinFetchBody(e.path, 1); // simulate a second sharer of the same body
+    kernel._pinFetchBody(e.path, fetchPid); // simulate a second sharer of the same body
     await fetchBody("https://registry.npmjs.org/lifetime-f"); // evict e
     kernel.releaseFetchBody(e.path);
     assert(kernel.exists(e.path), "a shared fetch body survives the first of its two readers");
@@ -2632,7 +2633,7 @@ setTimeout(() => { fs.writeFileSync('/stall/survived.txt', 'still here'); }, 400
     const g = await fetchBody("https://registry.npmjs.org/lifetime-g");
     await fetchBody("https://registry.npmjs.org/lifetime-h"); // evict g while pinned
     assert(kernel.exists(g.path), "a body handed to a live process is not reclaimed early");
-    kernel._releaseFetchBodiesForPid(1);
+    kernel._releaseFetchBodiesForPid(fetchPid);
     assert(!kernel.exists(g.path), "a dead process's unread fetch bodies are reclaimed");
 
     kernel.fetchCacheMaxBytes = savedCap;
