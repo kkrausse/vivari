@@ -1,5 +1,23 @@
 # Vivari — Roadmap
 
+## Causal synchronous child capture repair — 2026-09-30
+
+New Chrome routing evidence at `3e390d4` passes all three tiny spawn modes, then
+shows the original large execSync child exited before response publication threw,
+leaving its parent on REQUEST/OP_SPAWN. This is the inherited capture/publication
+defect (also present at clean baseline `446df00f`), not a spawn gate or topology
+deadlock. Raw binary was decoded as UTF-8 and JSON-encoded into a fixed 1 MiB
+window; the exit callback's exception escaped the syscall promise guard.
+
+Preserve captured bytes, honor maxBuffer per stream, return small base64 or raw
+VFS spill metadata, and read/unlink spills with the existing guest fd syscalls.
+Guard deferred publication and turn forgotten oversized SAB frames into EFBIG.
+ENOBUFS returns partial captured bytes instead of accumulating without a bound.
+Spills belong to the parent and are transient/nonpersistent. The exact original
+fixture is now a real-guest regression alongside byte/encoding/boundary and fault
+cleanup cases. Parent coordinates rebuilding both bundles and actual Chrome
+acceptance; no retained failed cohort or generated distribution is modified here.
+
 ## Single-kernel spawn routing diagnostic checkpoint — 2026-09-30
 
 The first real-browser cohort retains a parked synchronous spawn with no child;

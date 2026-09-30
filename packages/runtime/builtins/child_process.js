@@ -44,6 +44,7 @@ export function createChildProcess({ sys, process, Buffer, EventEmitter, Readabl
       cwd: opts.cwd || process.cwd(),
       env: opts.env || process.env,
       capture: !inherit,
+      maxBuffer: opts.maxBuffer ?? 1024 * 1024,
     };
     // `input` travels WITH the spawn, because there is no later. The caller is
     // parked on Atomics.wait from here until the child exits, so it can never
@@ -71,17 +72,51 @@ export function createChildProcess({ sys, process, Buffer, EventEmitter, Readabl
       // Buffer instead would read as "the child printed nothing".
       return { status: r.code, signal: null, pid: r.pid, stdout: null, stderr: null, output: [null, null, null] };
     }
-    const wrap = (s) => (opts.encoding ? s : Buffer.from(s || ""));
-    const stdout = wrap(r.stdout);
-    const stderr = wrap(r.stderr);
-    return {
-      status: r.code,
-      signal: null,
+    const readOutput = stream => {
+      if (!r[stream + "Path"]) {
+        return r.outputEncoding === "base64" ? Buffer.from(r[stream] || "", "base64") : Buffer.from(r[stream] || "");
+      }
+      const path = r[stream + "Path"];
+      let fd;
+      try {
+        fd = sys.open(path, 0, 0);
+        const size = sys.fstat(fd).size;
+        const bytes = Buffer.alloc(size);
+        let offset = 0;
+        while (offset < size) {
+          const chunk = sys.fdRead(fd, size - offset, offset);
+          if (!chunk.length) throw new Error("Unexpected end of captured child output");
+          bytes.set(chunk, offset);
+          offset += chunk.length;
+        }
+        return bytes;
+      } finally {
+        try { if (fd !== undefined) sys.close(fd); }
+        finally { sys.unlink(path); }
+      }
+    };
+    const wrap = bytes => opts.encoding && opts.encoding !== "buffer" ? bytes.toString(opts.encoding) : bytes;
+    let stdout, stderr;
+    try {
+      stdout = wrap(readOutput("stdout"));
+      stderr = wrap(readOutput("stderr"));
+    } catch (error) {
+      return { status: null, signal: r.signal || null, pid: r.pid, stdout: null, stderr: null, output: [null, null, null], error };
+    }
+    const result = {
+      status: r.errorCode ? null : r.code,
+      signal: r.signal || null,
       pid: r.pid,
       stdout,
       stderr,
       output: [null, stdout, stderr],
     };
+    if (r.errorCode) {
+      const error = new Error("spawnSync " + command + " " + r.errorCode);
+      Object.assign(error, result, { code: r.errorCode });
+      result.error = error;
+    }
+    return result;
   }
 
   function execSync(command, opts = {}) {
@@ -510,7 +545,16 @@ export function createChildProcess({ sys, process, Buffer, EventEmitter, Readabl
   return {
     spawnSync,
     execSync,
-    execFileSync: (file, args, opts) => spawnSync(file, args || [], opts).stdout,
+    execFileSync: (file, args, opts) => {
+      const r = spawnSync(file, args || [], opts);
+      if (r.error) throw r.error;
+      if (r.status !== 0) {
+        const error = new Error("Command failed: " + file);
+        Object.assign(error, { status: r.status, signal: r.signal, stdout: r.stdout, stderr: r.stderr });
+        throw error;
+      }
+      return r.stdout;
+    },
     spawn,
     exec,
     execFile,

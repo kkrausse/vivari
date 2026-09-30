@@ -31,6 +31,14 @@
 // Response frame:
 //   STATE_RESPONSE_OK  -> raw bytes, meaning is opcode-specific
 //   STATE_RESPONSE_ERR -> UTF-8 errno code ("ENOENT", "ENOTDIR", ...)
+// OP_SPAWN request: JSON {command,args,cwd,env,capture,maxBuffer,input?}.
+// Response: JSON {code,signal,errorCode,pid,outputEncoding:'base64',stdout,stderr}
+// for inline byte capture, or {code,signal,errorCode,pid,outputEncoding:'base64',
+// stdoutPath,stderrPath} for raw VFS files when encoded output exceeds the window.
+// The guest reads spill files via chunked fd syscalls and unlinks them; parent
+// exit reclaims unread spills. maxBuffer limits each raw stream (default 1 MiB).
+// ENOBUFS capture overflow returns partial output + signal/error metadata. The
+// opcode, SAB layout and window are unchanged; ship kernel/guest revisions together.
 
 export const CTRL_SLOTS = 6;
 export const CTRL_BYTES = CTRL_SLOTS * 4;

@@ -89,6 +89,19 @@ until overwritten or kernel termination. `test:single-kernel-routing` exercises
 actual guest workers/FS MessagePorts, deterministic suspended spawn gates in all
 three modes, bounded snapshots, identity mismatch detection and error release.
 
+Synchronous child capture is byte-preserving and bounded by the requested
+`maxBuffer` per stream (default 1 MiB). Captured descendants use the existing
+byte-stdio mode, including shell-forwarded output. OP_SPAWN returns base64 inline
+output when the complete encoded frame fits; otherwise it returns paths to raw
+kernel-owned `/var/run/vv-spawn` files. The guest reads through its existing
+chunked fd protocol and unlinks each file. Parent exit reclaims unread/partially
+staged files, and this transient prefix is excluded from OPFS persistence. No
+worker, opcode, SAB enlargement or synchronous kernel wait was added. Kernel and
+guest bundles must be rebuilt together for the new opcode-specific JSON metadata.
+Overflow beyond maxBuffer settles with ENOBUFS, partial bytes and SIGTERM metadata;
+generic oversized SAB publication settles EFBIG. Deferred spawn-exit encoding/
+staging errors pass through failSyscall rather than leaving a parked parent.
+
 This document explains how Vivari works end to end: the core constraint it
 solves, the worker topology, the syscall protocol, the filesystem, the process
 model, the Node runtime, networking, native code, and the build. It is the

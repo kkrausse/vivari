@@ -17,6 +17,12 @@ pause frames. `syscalls: 1` alone does not identify the serviced opcode. Control
 samples are read-only and nontransactional; preserve original failed cohorts.
 `test:single-kernel-routing` verifies diagnostics using real guests and FS ports.
 
+Large synchronous child output uses raw transient VFS spills, not a larger SAB.
+Ship OP_SPAWN's kernel/guest JSON metadata together. `test:sync-capture` exercises
+the exact binary >1MiB Chrome fixture, inline/spill/maxBuffer boundaries, deferred
+publication failure release, and parent-owned spill cleanup. An exit callback is
+outside serviceSyscall's promise guard; always explicitly guard its publication.
+
 Run `test:single-kernel-review` for the ownership/body-lifetime regressions. An
 oversized whole-file SAB response is NOT a consumed fetch body: retain its pin
 until the chunked-fd retry closes, or same-thread reclamation can turn EFBIG into

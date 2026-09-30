@@ -453,7 +453,7 @@ export class Kernel {
   }
 
   // ---- process lifecycle ----------------------------------------------------
-  createProcess(spec, { parentPid = null, capture = false, stream = false, threadPort = null } = {}) {
+  createProcess(spec, { parentPid = null, capture = false, stream = false, threadPort = null, captureLimit = null } = {}) {
     const pid = this.nextPid++;
     const sab = new SharedArrayBuffer(SAB_BYTES);
     const { ctrl, data } = makeViews(sab);
@@ -461,6 +461,10 @@ export class Kernel {
       pid,
       parentPid,
       capture,
+      captureLimit,
+      capturedBytes: [0, 0],
+      captureError: null,
+      spawnOutputPaths: new Set(),
       // #15: async children stream their output to the *parent worker* (so its
       // event loop can react live) instead of buffering (capture) or going to the
       // host (default). See onOutput + handleSpawnAsync.
@@ -720,7 +724,19 @@ export class Kernel {
     // `unobservable` in core/terminal-feedback.js.
     proc.everOutput = true;
     if (proc.capture) {
-      (isErr ? proc.errBuf : proc.outBuf).push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+      if (proc.captureLimit != null) {
+        const bytes = typeof chunk === "string" ? encodeString(chunk) : new Uint8Array(chunk);
+        const channel = isErr ? 1 : 0;
+        const remaining = Math.max(0, proc.captureLimit - proc.capturedBytes[channel]);
+        (isErr ? proc.errBuf : proc.outBuf).push(bytes.slice(0, remaining));
+        proc.capturedBytes[channel] += Math.min(bytes.length, remaining);
+        if (bytes.length > remaining) {
+          proc.captureError = "ENOBUFS";
+          this.finalize(pid, 143, "SIGTERM");
+        }
+      } else {
+        (isErr ? proc.errBuf : proc.outBuf).push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+      }
       return;
     }
     if (proc.stream) {
@@ -958,6 +974,10 @@ export class Kernel {
     // Any fetched body this process was handed but never read would otherwise stay
     // pinned for the rest of the session.
     this._releaseFetchBodiesForPid(pid);
+    for (const path of proc.spawnOutputPaths) {
+      try { this.unlink(path); } catch { /* already consumed by the parent */ }
+    }
+    proc.spawnOutputPaths.clear();
     // Drop any ports this process was serving and fail its in-flight requests,
     // so a fetch that was waiting on a now-dead server does not hang forever.
     for (const [port, owner] of this.listeners) {
@@ -1008,6 +1028,12 @@ export class Kernel {
         this.pipeConns.delete(connId);
       }
     }
+    const captured = proc.captureLimit == null ? null : [proc.outBuf, proc.errBuf].map(chunks => {
+      const bytes = new Uint8Array(chunks.reduce((n, chunk) => n + chunk.length, 0));
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+      return bytes;
+    });
     const result = {
       code,
       pid,
@@ -1015,14 +1041,19 @@ export class Kernel {
       // Non-null only when the process died of a worker fault rather than exiting.
       // Consumers can treat it as "this code is not the program's own exit status".
       error,
-      stdout: proc.outBuf.join(""),
-      stderr: proc.errBuf.join(""),
+      stdout: captured ? new TextDecoder().decode(captured[0]) : proc.outBuf.join(""),
+      stderr: captured ? new TextDecoder().decode(captured[1]) : proc.errBuf.join(""),
       // The invocation, so an observer (kernel-worker's onProcExit) can tell that
       // e.g. an `npm install` in a given cwd just finished and snapshot its deps.
       command: proc.command,
       args: proc.args || [],
       cwd: proc.cwd,
     };
+    // Private binary handoff for OP_SPAWN; public host result/spread stays textual.
+    if (captured) Object.defineProperties(result, {
+      capturedOutput: { value: captured },
+      captureError: { value: proc.captureError },
+    });
     // A worker fault goes to onError when a caller asked for one (start()), so it can
     // reject rather than look like a clean non-zero exit. Everything else — and every
     // caller that only wired onExit — settles exactly as before.
@@ -1115,12 +1146,10 @@ export class Kernel {
     // A payload larger than the window used to surface as `RangeError: offset is
     // out of bounds` from deep inside Uint8Array.set, which killed the kernel and
     // named neither the syscall nor the size. Anything that can grow must spill
-    // out of band (see _stageInboundBody); this says so when something forgets.
-    if (bytes.length > DATA_BYTES) {
-      throw new Error(
-        `kernel: syscall response of ${bytes.length} bytes exceeds the ${DATA_BYTES}-byte window — ` +
-          "chunk it or pass it through the VFS",
-      );
+    // out of band. A forgotten spill is an errno, never an abandoned REQUEST.
+    if (bytes.length > Math.min(DATA_BYTES, proc.data.length)) {
+      this.respondErr(proc, "EFBIG");
+      return;
     }
     proc.data.set(bytes, 0);
     Atomics.store(proc.ctrl, I_RES_LEN, bytes.length);
@@ -1633,6 +1662,11 @@ export class Kernel {
       return;
     }
     const cwd = spec.cwd || "/";
+    const maxBuffer = spec.maxBuffer ?? 1024 * 1024;
+    if (typeof maxBuffer !== "number" || !Number.isFinite(maxBuffer) || maxBuffer < 0) {
+      this.respondErr(parent, "EINVAL");
+      return;
+    }
     // On-demand: if this command is a lazily-registered heavy tool, materialize
     // it (fetch + unpack into the VFS) before resolving. The parent stays parked
     // on Atomics.wait meanwhile; the kernel loop keeps servicing other processes.
@@ -1649,8 +1683,10 @@ export class Kernel {
     }
     this.syscallTrace.record(parent.pid, "spawn-create-before", parent.ctrl);
     const childPid = this.createProcess(
-      { command: spec.command, programPath, args: spec.args || [], cwd, env: spec.env || {} },
-      { parentPid: parent.pid, capture: !!spec.capture },
+      // Captured output is a byte pipe even for legacy text-terminal parents.
+      // The flag propagates through a shell to its streamed descendants too.
+      { command: spec.command, programPath, args: spec.args || [], cwd, env: spec.capture ? { ...spec.env, VV_BYTE_STDIO: "1" } : spec.env || {} },
+      { parentPid: parent.pid, capture: !!spec.capture, captureLimit: spec.capture ? maxBuffer : null },
     );
     this.syscallTrace.record(parent.pid, "spawn-create-after", parent.ctrl, { childPid });
     // A synchronously spawned child's stdin is settled at birth: `input` if the
@@ -1663,18 +1699,35 @@ export class Kernel {
     if (spec.input) this.sendStdin(childPid, b64ToBytes(spec.input));
     this.sendStdin(childPid, null);
     this.procs.get(childPid).onExit = (res) => {
+      if (!this.procs.has(parent.pid) || parent.finalized) return;
       this.syscallTrace.record(parent.pid, "spawn-child-exit", parent.ctrl, { childPid });
-      this.respondOk(
-        parent,
-        encodeString(
-          JSON.stringify({
-            code: res.code,
-            stdout: res.stdout,
-            stderr: res.stderr,
-            pid: childPid,
-          }),
-        ),
-      );
+      // This callback runs from a later worker message, outside serviceSyscall's
+      // async error guard. Publication/staging failures must still release parent.
+      try {
+        const output = res.capturedOutput || [EMPTY, EMPTY];
+        const result = { code: res.code, signal: res.signal, errorCode: res.captureError || null, pid: childPid, outputEncoding: "base64" };
+        const inline = { ...result, stdout: "", stderr: "" };
+        const inlineLength = encodeString(JSON.stringify(inline)).length + output.reduce((n, bytes) => n + 4 * Math.ceil(bytes.length / 3), 0);
+        let response;
+        if (inlineLength <= Math.min(DATA_BYTES, parent.data.length)) {
+          inline.stdout = bytesToB64(output[0]);
+          inline.stderr = bytesToB64(output[1]);
+          response = encodeString(JSON.stringify(inline));
+        } else {
+          // Do not construct a multi-megabyte base64/JSON string just to reject it.
+          this.mkdirp("/var/run/vv-spawn");
+          for (const [index, stream] of ["stdout", "stderr"].entries()) {
+            const path = `/var/run/vv-spawn/${parent.pid}-${childPid}-${stream}.bin`;
+            parent.spawnOutputPaths.add(path);
+            this.writeFile(path, output[index]);
+            result[stream + "Path"] = path;
+          }
+          response = encodeString(JSON.stringify(result));
+        }
+        this.respondOk(parent, response);
+      } catch (err) {
+        this.failSyscall(parent, OP_SPAWN, err);
+      }
     };
   }
 

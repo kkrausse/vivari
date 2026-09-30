@@ -154,7 +154,7 @@ function buildAccess(vfs) {
 // in-memory index is rebuilt per session and never read back across reloads, so
 // persisting those tarball bodies is pure dead weight — the durable, reusable copy
 // is npm/yarn/pnpm's own content-addressed cache under /home/user/.cache.
-const IGNORE = ["/bin", "/tmp", "/proc", "/dev", "/etc", "/usr", "/var/cache"];
+const IGNORE = ["/bin", "/tmp", "/proc", "/dev", "/etc", "/usr", "/var/cache", "/var/run/vv-spawn"];
 
 // Volatile paths INSIDE an otherwise-persisted package-manager cache. The cache
 // itself is deliberately durable (see npm_config_cache in kernel-worker) — these

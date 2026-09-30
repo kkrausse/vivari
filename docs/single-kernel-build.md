@@ -115,3 +115,40 @@ compares the entire SAB before/after diagnostics, releases and joins actual chil
 workers in all three modes, and verifies an injected dispatch fault releases a
 real parked caller through the unchanged errno path. These are instrumentation
 contracts, not evidence that the natural Chrome hang has been repaired.
+
+## Causal repair: synchronous capture publication
+
+The fresh `3e390d4` browser trace passes minimal async/spawnSync/execSync, then the
+original 1,048,583-byte binary execSync fixture records child exit, response-ok
+publication entry and a worker-message error. The parent remains REQUEST/opcode
+20 with matching FS/kernel SAB identity and no lazy loader pending. Source at both
+`3e390d4` and upstream baseline `446df00f` decodes captured bytes as UTF-8, joins
+strings and JSON-encodes them into the fixed 1 MiB window; respondOk throws on
+overflow. Its deferred child-exit callback is outside serviceSyscall's promise
+guard, so the browser worker-message guard logs the throw but cannot answer the
+parent. For this fixture, legacy framing is 2,669,499 bytes (PID 9 metadata), and
+UTF-8 round-trip output is already corrupted (2,076,181 bytes). Earlier headless
+tests captured only the short `child-ok` stdout and never covered this window.
+
+The repair retains the 1 MiB SAB and single-kernel topology. Captured descendants
+use existing byte stdio, buffers are bounded by maxBuffer (default 1 MiB per
+stream), and OP_SPAWN metadata is base64 inline or raw VFS stdout/stderr paths.
+The guest reads spills with fd chunks and unlinks them; parent exit reclaims
+unread/partial staging, and `/var/run/vv-spawn` is excluded from OPFS. Excess
+capture settles ENOBUFS with partial bytes/signal metadata. Generic oversized
+publication settles EFBIG, and deferred encoding/staging failures release the
+caller via the existing errno path. No new worker/opcode/native input is added.
+
+`test:sync-capture` runs the exact original fixture with browser byte-stdio env,
+plus legacy text parents, byte-exact inline/spill/both-stream cases, encoding,
+maxBuffer overflow, exact SAB boundary and a failing second spill write. It also
+terminates a parent before spill consumption and checks cleanup. Parent must
+coordinate a fresh committed-source build/receipt and rebuilt matching guest
+bundle before Chrome acceptance. Existing distribution outputs and both failed
+browser cohorts remain frozen; this source owner does not rebuild dist.
+
+Repair verification: `node scripts/test-sync-capture.mjs`,
+`node scripts/test-single-kernel.mjs`, `node scripts/test-single-kernel-routing.mjs`,
+`node scripts/test-single-kernel-review.mjs`, full `node scripts/verify-node.mjs`,
+and `bunx tsc -p packages/core/tsconfig.build.json --noEmit`: PASS. Actual Chrome
+repair acceptance is still required after the coordinated rebuild.
