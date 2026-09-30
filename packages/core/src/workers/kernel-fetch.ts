@@ -2,19 +2,8 @@
 // type-checked: it imports the untyped runtime toolchain-shims table and leans on
 // dynamic fetch shapes. esbuild (via Vite) is the compiler; strict typing is a
 // separate, larger effort.
-// The Fetcher Worker — Vivari's dedicated outbound-network worker.
-//
-// Phase 2, item #9 (Network/registry worker). The kernel worker delegates every
-// outbound fetch to this worker so that downloading/decompressing/parsing large
-// payloads (npm metadata + tarballs) never blocks the thread that services
-// syscalls. It owns no SharedArrayBuffer: the kernel talks to it with plain
-// messages, and the (possibly multi-MB) body is transferred back as an
-// ArrayBuffer — it never travels through the 1 MiB syscall window.
-//
-// Protocol (kernel <-> fetcher):
-//   kernel  -> { type: 'fetch', id, url, init }   init = {method, headers, body} | null
-//   fetcher -> { type: 'fetch-result', id, ok, status, statusText, headers, body } (body transferred)
-//           -> { type: 'fetch-result', id, error }                       (network failure)
+// Async outbound networking inside the kernel. Registry aliases and egress
+// policy are unchanged; no separate runtime fetch worker/channel exists.
 
 // The native->drop-in alias tables are the single source of truth for the toolchain
 // subsystem (shared with the in-process esbuild patch); add drop-ins there.
@@ -138,7 +127,7 @@ function rewritePackument(json, src) {
   return json;
 }
 
-async function doFetch(url, init) {
+export async function doFetch(url, init) {
   // Default mode is 'cors'; with ACAO:* the response is readable and satisfies
   // COEP:require-corp. Follows redirects (registry tarballs may 3xx to a CDN).
   // `init` (from the http/https client shim) carries method/headers/body so a
@@ -204,29 +193,3 @@ async function doFetch(url, init) {
   for (const [k, v] of res.headers) headers[k] = v;
   return { ok: res.ok, status: res.status, statusText: res.statusText, headers, body: buf };
 }
-
-self.onmessage = async (event) => {
-  const m = event.data;
-  if (m.type !== "fetch") return;
-  try {
-    const r = await doFetch(m.url, m.init);
-    self.postMessage(
-      {
-        type: "fetch-result",
-        id: m.id,
-        ok: r.ok,
-        status: r.status,
-        statusText: r.statusText,
-        headers: r.headers,
-        body: r.body,
-      },
-      [r.body],
-    );
-  } catch (err) {
-    self.postMessage({
-      type: "fetch-result",
-      id: m.id,
-      error: String((err && err.message) || err),
-    });
-  }
-};

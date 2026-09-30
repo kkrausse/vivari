@@ -154,7 +154,9 @@ export class KernelBridge {
     }
     this.previewPopout = options.previewPopout === "isolated" ? "isolated" : "same-origin";
     this.worker = new Worker(
-      new URL("./workers/kernel-worker.ts", import.meta.url),
+      // Keep the query outside Vite's transformed URL: otherwise it is removed.
+      // SQLite's upstream OPFS proxy is redundant with our kernel-owned mirror.
+      new URL("./workers/kernel-worker.ts", import.meta.url).href + "?opfs-disable",
       { type: "module", name: options.workerName ?? "Vivari Kernel" },
     );
     this.worker.onmessage = (event: MessageEvent<KernelMessage>) => {

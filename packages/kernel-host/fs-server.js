@@ -1,11 +1,11 @@
-// The File System Worker's servicing core (Phase 2 #14).
+// The kernel-owned filesystem servicing core in the single-kernel fork.
 //
 // The Rust/Wasm VFS used to live inside the Kernel and every fs syscall was
-// serviced on the kernel thread. #14 moves the VFS into its own dedicated worker
-// so filesystem traffic never competes with process/network supervision. This
+// serviced on the kernel thread. The experimental fork consolidates ownership
+// back into that supervisor, without blocking kernel-local filesystem calls. This
 // class is the environment-agnostic half: it owns the single VFS instance and
 // services fs opcodes **directly over each client's SharedArrayBuffer**, exactly
-// like the kernel did — but off the kernel's thread.
+// while each guest is blocked and the supervisor remains free to service work.
 //
 // Clients (each with their own SAB) register once; a doorbell (a MessagePort for
 // processes, or a plain message for the kernel's own sync fs) tells us which
@@ -338,7 +338,8 @@ export class FsServer {
       case OP_EXISTS:
         return new Uint8Array([vfs.exists(s(0)) ? 1 : 0]);
       case OP_READDIR:
-        return encodeString(vfs.readdir(s(0)).join("\n"));
+        // Directory names may contain newline; delimiter framing is lossy.
+        return encodeString(JSON.stringify(Array.from(vfs.readdir(s(0)))));
       case OP_MKDIR: {
         const path = s(0);
         vfs.mkdir(path, (flags & FLAG_RECURSIVE) !== 0);

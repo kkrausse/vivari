@@ -19,7 +19,8 @@
 
 import { newProgress, onFetch, onOutput, idleClear, stallVerdict, shouldReportStallFor, stallReportChunk } from "../../terminal-feedback.js";
 import { Kernel } from "../../../kernel-host/kernel.js";
-import { createKernelFs } from "../../../kernel-host/kernel-fs.js";
+import { createKernelFilesystem } from "./kernel-filesystem.ts";
+import { doFetch } from "./kernel-fetch.ts";
 import { initTransferList } from "../../../kernel-host/worker-transfer.js";
 import { ensureRealNpm } from "../../../kernel-host/load-real-npm.js";
 import { ensureRealYarn } from "../../../kernel-host/load-real-yarn.js";
@@ -49,8 +50,6 @@ async function safeMeasureMemory() {
 // Diagnostic mem-query correlation for the File System Worker (a plain async
 // message, off the sync SAB path). The kernel asks the FS worker for the VFS's
 // in-RAM content footprint; the reply is matched back here by id.
-let memReqSeq = 1;
-const memPending = new Map();
 
 // Live Process Workers by PID, for the per-PID "Measure Memory" breakdown. Each
 // worker answers a `proc-mem` query with its own JS heap + module-cache stats;
@@ -1320,7 +1319,7 @@ function defaultTermCwd() {
 }
 // The File System Worker handle, kept module-scoped so the page-hide flush relay
 // (host -> here -> FS worker) can reach it. Set in boot().
-let fsWorkerRef = null;
+let filesystemRef = null;
 // Whole-file lazy compression gate for the VFS, sourced from the page at boot
 // (init.compress, the BootOptions.compress SDK flag) and relayed to the File
 // System Worker. On by default; a consumer sets it false only to trade memory
@@ -1389,17 +1388,12 @@ async function warmDevServer(port, timeoutMs = 180000) {
 // count). Resolves { bytes, files } (or a -1 sentinel if the wasm build predates
 // the mem_bytes diagnostic), or null if the FS worker isn't up yet.
 function queryVfsMem(timeoutMs = 2000) {
-  if (!fsWorkerRef) return Promise.resolve(null);
-  return new Promise((resolve) => {
-    const id = memReqSeq++;
-    const done = (data) =>
-      resolve(data ? { bytes: data.bytes, files: data.files, logical: data.logical } : null);
-    memPending.set(id, done);
-    setTimeout(() => {
-      if (memPending.delete(id)) resolve(null);
-    }, timeoutMs);
-    fsWorkerRef.postMessage({ type: "fs-mem", id });
-  });
+  const vfs = filesystemRef?.server.vfs;
+  return Promise.resolve(vfs ? {
+    bytes: vfs.mem_bytes?.() ?? -1,
+    files: vfs.file_count?.() ?? -1,
+    logical: vfs.logical_mem_bytes?.() ?? -1,
+  } : null);
 }
 
 // Ask every live Process Worker for its own JS heap + retention stats, in
@@ -1440,10 +1434,8 @@ function queryAllProcMem(timeoutMs = 2000) {
 }
 
 async function boot() {
-  // The Rust/Wasm VFS now lives in its own nested File System Worker (#14). We
-  // wait for it to boot, then talk to it: the kernel over its own sync SAB
-  // channel (createKernelFs), and each process directly over a MessagePort
-  // doorbell wired at spawn.
+  // One supervisor owns the VFS, persistence, networking, and lifecycle. Guests
+  // remain separate workers; kernel-local filesystem access never blocks.
   const t0 = Date.now();
   post("log", { line: "Booting Vivari…", dim: true });
   post("boot-progress", { phase: "init" });
@@ -1455,86 +1447,20 @@ async function boot() {
     compileWasmModule(new URL("../../../crypto/pkg/vivari_crypto_bg.wasm", import.meta.url)),
   ]);
 
-  // Two independent nested workers, kicked off IN PARALLEL so their scripts load +
-  // boot concurrently instead of one-after-another: the File System Worker (Rust/
-  // Wasm VFS + OPFS restore — the kernel waits on this) and the Fetcher Worker
-  // (outbound npm; depends on neither the VFS nor the codecs, so there's no reason
-  // to create it later — overlapping its load shaves a step off cold boot).
-  post("log", { line: "  [boot] starting file-system + fetcher workers…", dim: true });
-  const fsWorker = new Worker(new URL("./fs-worker.ts", import.meta.url), {
-    type: "module",
-    name: "File System Worker",
+  post("log", { line: "  [boot] initializing kernel-owned filesystem…", dim: true });
+  const filesystem = await createKernelFilesystem({
+    compression: vfsCompression,
+    emit: (m) => post(m.type, m),
   });
-  fsWorkerRef = fsWorker;
-  // Relay the compression gate now, before the FS worker's OPFS restore runs, so
-  // it's in force as early as possible (the FS worker queues it until the VFS is
-  // constructed). No-op on wasm builds that predate set_compression.
-  fsWorker.postMessage({ type: "fs-set-compression", on: vfsCompression });
-  let onKernelFsMessage = () => {};
-  const fsReady = new Promise((resolve) => {
-    fsWorker.onmessage = (event) => {
-      if (event.data.type === "ready") resolve();
-      // The FS worker logs OPFS restore status; relay it to the host UI.
-      else if (["log", "workspace-persistence", "vv-reply", "vv-fs-changed"].includes(event.data.type)) post(event.data.type, event.data);
-      // Structured boot progress (OPFS restore done/total) — relay for the UI.
-      else if (event.data.type === "boot-progress")
-        post("boot-progress", {
-          phase: event.data.phase,
-          done: event.data.done,
-          total: event.data.total,
-        });
-      // Diagnostic VFS-memory reply (off the sync SAB path) — resolve its waiter.
-      else if (event.data.type === "fs-mem") {
-        const p = memPending.get(event.data.id);
-        if (p) {
-          memPending.delete(event.data.id);
-          p(event.data);
-        }
-      } else onKernelFsMessage(event.data);
-    };
-  });
-
-  // Fetcher Worker (Phase 2 #9): all outbound network goes through it, so
-  // downloading/decompressing large npm payloads never stalls syscall servicing.
-  // Created here (in parallel with the VFS); the kernel calls `fetcher(url)`.
-  const fetcherWorker = new Worker(new URL("./fetcher-worker.ts", import.meta.url), {
-    type: "module",
-    name: "Fetcher Worker",
-  });
-  let fetchSeq = 1;
-  const fetchPending = new Map();
-  fetcherWorker.onmessage = (event) => {
-    const m = event.data;
-    if (m.type !== "fetch-result") return;
-    const p = fetchPending.get(m.id);
-    if (!p) return;
-    fetchPending.delete(m.id);
-    if (m.error) p.reject(new Error(m.error));
-    else
-      p.resolve({
-        ok: m.ok,
-        status: m.status,
-        statusText: m.statusText,
-        headers: m.headers,
-        body: new Uint8Array(m.body),
-      });
+  filesystemRef = filesystem;
+  // Fetch/arrayBuffer yield to the host. Never synchronously wait for a guest:
+  // its filesystem/syscall callbacks must keep running on this kernel thread.
+  const fetcher = async (url, init) => {
+    const result = await doFetch(url, init);
+    return { ...result, body: new Uint8Array(result.body) };
   };
-  // `init` (from the http/https client shim: {method, headers, body}) lets a real
-  // ClientRequest egress; a bare fetcher(url) still does a GET.
-  const fetcher = (url, init) =>
-    new Promise((resolve, reject) => {
-      const id = fetchSeq++;
-      fetchPending.set(id, { resolve, reject });
-      const msg = { type: "fetch", id, url, init: init || null };
-      // Transfer the request body's buffer when present (avoids a copy).
-      const transfer = init && init.body && init.body.buffer ? [init.body.buffer] : [];
-      fetcherWorker.postMessage(msg, transfer);
-    });
-
-  await fsReady;
-  const kernelFs = createKernelFs(fsWorker);
+  const kernelFs = { fs: filesystem.fs, onMessage: () => {} };
   kernelFsRef = kernelFs;
-  onKernelFsMessage = kernelFs.onMessage;
   post("log", { line: `  [boot] file system ready (+${Date.now() - t0}ms).`, dim: true });
   // OPFS restore (the long pole) is done; the remaining steps before the UI
   // unlocks (codec compile + kernel construction) are quick and indeterminate.
@@ -1549,8 +1475,7 @@ async function boot() {
   // human-readable name (shown in DevTools' JS VM instance list) with its PID —
   // a Worker's name is fixed at creation, so naming it here (not from a pre-warmed
   // pool) is what keeps the DevTools list legible: every worker maps to its PID.
-  // We also open a MessageChannel between the process and the File System Worker
-  // so its fs syscalls ring that worker's doorbell directly (never the kernel).
+  // A guest's fs doorbell terminates here, in the same kernel that owns its PID.
   const spawnWorker = (info) => {
     const worker = new Worker(new URL("./process-worker.ts", import.meta.url), {
       type: "module",
@@ -1630,7 +1555,7 @@ async function boot() {
     worker.onmessageerror = () => reportWorkerError("worker could not deserialize a message");
     procWorkers.set(info.pid, { worker, name: "PID " + info.pid });
     const { port1, port2 } = new MessageChannel();
-    fsWorker.postMessage({ type: "fs-register", client: info.pid, sab: info.sab, port: port2 }, [port2]);
+    filesystem.server.register(info.pid, info.sab, port2);
     // #16 stage 2b: a spawned thread also receives its parentPort (a MessagePort
     // transferred from its creator through us) alongside its fs doorbell.
     // [optimize] Hand over the pre-compiled codec Modules (cloned, not
@@ -1655,7 +1580,8 @@ async function boot() {
       terminate: () => {
         worker.terminate();
         procWorkers.delete(info.pid);
-        fsWorker.postMessage({ type: "fs-unregister", client: info.pid });
+        filesystem.server.unregister(info.pid);
+        port2.close();
       },
       postMessage: (m) => worker.postMessage(m),
     };
@@ -2311,7 +2237,6 @@ const PY_MAX_BYTES = 40_000_000;
 const PY_STORE_REL = ".venv/lib/python3.14/site-packages";
 const PY_INTERP_SITE = "/lib/python3.14/site-packages";
 
-let pyLspWorker = null;
 let pyLspSeq = 1;
 const pyLspPending = new Map();
 // path -> length, so a re-send only carries what changed. Length rather than a
@@ -2319,35 +2244,7 @@ const pyLspPending = new Map();
 const pyLspSent = new Map();
 
 function pythonLspWorker() {
-  if (pyLspWorker) return pyLspWorker;
-  pyLspWorker = new Worker(new URL("./python-lsp-worker.ts", import.meta.url), {
-    type: "module",
-    name: "Python Language Service",
-  });
-  pyLspWorker.onmessage = (event) => {
-    const m = event.data;
-    if (m.type === "state") {
-      // Not a reply to anything — the editor subscribes to this so the status bar
-      // can say "starting…" during a boot nobody explicitly asked for.
-      post("py-lsp-state", { state: m.state, detail: m.detail || "" });
-      return;
-    }
-    if (m.type !== "py-lsp-reply") return;
-    const pending = pyLspPending.get(m.id);
-    if (!pending) return;
-    pyLspPending.delete(m.id);
-    pending(m);
-  };
-  pyLspWorker.onerror = (e) => {
-    // A worker that died takes its interpreter with it. Say so, and let the next
-    // request build a new one rather than hanging on a worker that is gone.
-    post("py-lsp-state", { state: "failed", detail: (e && e.message) || "the language service worker stopped" });
-    for (const [, pending] of pyLspPending) pending({ ok: false, error: "the language service worker stopped" });
-    pyLspPending.clear();
-    pyLspWorker = null;
-    pyLspSent.clear();
-  };
-  return pyLspWorker;
+  throw new Error("Python editor language service is unavailable in the single-kernel fork; Python guest processes remain supported");
 }
 
 /**
@@ -2525,13 +2422,12 @@ self.onmessage = async (event) => {
   const m = event.data;
   if (m.type === "workspace-install-tree" || m.type === "workspace-install-tree-image") {
     try {
-      const buffers = [...new Set(m.entries.filter(e => e.kind === "file").map(e => e.bytes.buffer))];
-      fsWorkerRef.postMessage(m, buffers);
+      filesystemRef.handle(m);
     } catch (error) { post("vv-reply", { reqId: m.reqId, ok: false, error: String(error) }); }
     return;
   }
   if (["workspace-flush", "workspace-persistence", "workspace-read"].includes(m.type)) {
-    fsWorkerRef.postMessage(m);
+    filesystemRef.handle(m);
     return;
   }
   if (m.type === "workspace-listeners") {
@@ -2562,7 +2458,7 @@ self.onmessage = async (event) => {
   // The page is hiding — relay a best-effort flush to the FS worker so the OPFS
   // mirror catches any writes still queued in the write-behind buffer.
   if (m.type === "fs-flush") {
-    if (fsWorkerRef) fsWorkerRef.postMessage({ type: "fs-flush" });
+    if (filesystemRef) filesystemRef.handle({ type: "fs-flush" });
     return;
   }
 
@@ -2715,7 +2611,26 @@ self.onmessage = async (event) => {
           }
           p.terminalId = terminalForPid(p.pid) ?? null;
         }
-        post("vv-reply", { reqId: m.reqId, ok: true, diag: { ...diag, vfs } });
+        post("vv-reply", { reqId: m.reqId, ok: true, diag: {
+          ...diag, vfs,
+          workers: {
+            kernel: 1, filesystem: 0, httpCoordinator: 0, fetcher: 0, other: 0,
+            process: procWorkers.size,
+            processPids: [...procWorkers.keys()],
+          },
+          topology: {
+            model: "single-kernel-v1",
+            kernelWorkers: 1,
+            filesystemOwner: "kernel",
+            persistenceOwner: "kernel",
+            httpOwner: "kernel",
+            filesystemWorkers: 0,
+            fetcherWorkers: 0,
+            coordinatorWorkers: 0,
+            auxiliaryWorkers: 0,
+            processWorkers: [...procWorkers.keys()].map(pid => ({ role: "process", pid })),
+          },
+        } });
       })
       .catch((err) => post("vv-reply", { reqId: m.reqId, ok: false, error: errMsg(err) }));
     return;

@@ -40,16 +40,23 @@ const dec = new TextDecoder();
 
 export async function createOpfsPersistence({ access, shouldPersist = () => true, rootName = ROOT_DIR }) {
   if (!navigator.locks) throw new Error("OPFS ownership requires Web Locks");
+  let releaseOwnership = () => {};
   await new Promise((resolve, reject) => {
     navigator.locks.request(rootName === ROOT_DIR ? "vivari-vfs-owner" : `vivari-vfs-owner:${rootName}`, { ifAvailable: true }, lock => {
       if (!lock) { reject(new Error("OPFS already owned by another Vivari kernel")); return; }
       resolve();
-      return new Promise(() => {});
+      return new Promise(resolve => { releaseOwnership = resolve; });
     }).catch(reject);
   });
-  const origin = await navigator.storage.getDirectory();
-  const base = await origin.getDirectoryHandle(rootName, { create: true });
-  const filesBase = await base.getDirectoryHandle(FILES_DIR, { create: true });
+  let base, filesBase;
+  try {
+    const origin = await navigator.storage.getDirectory();
+    base = await origin.getDirectoryHandle(rootName, { create: true });
+    filesBase = await base.getDirectoryHandle(FILES_DIR, { create: true });
+  } catch (error) {
+    releaseOwnership();
+    throw error;
+  }
 
   // path (VFS absolute) -> { k:'file'|'dir'|'symlink', m:mode, t:target? }
   const meta = new Map();
@@ -343,5 +350,5 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
     return n;
   }
 
-  return { onWrite, onDelete, onRename, flush, restore, shouldPersist };
+  return { onWrite, onDelete, onRename, flush, restore, shouldPersist, releaseOwnership };
 }

@@ -14,7 +14,7 @@ import nodeCrypto from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import { Kernel } from "../packages/kernel-host/kernel.js";
-import { createKernelFs } from "../packages/kernel-host/kernel-fs.js";
+import { createHeadlessFilesystem } from "./lib/kernel-filesystem.mjs";
 // Retained Turbo-analog npm — no longer shipped in COREUTILS; installed here as
 // an offline test fixture (see makeKernel below).
 import { NPM_PROGRAM } from "../packages/kernel-host/programs/npm.js";
@@ -69,19 +69,8 @@ async function waitFor(cond, msg, tries = 200) {
 }
 
 async function makeKernel() {
-  // #14: the Wasm VFS runs in a dedicated File System Worker, exactly like the
-  // browser. The kernel (this main thread) waits for it to boot, then talks to
-  // it over its own sync SAB channel; processes get a MessagePort doorbell.
-  const fsWorker = new Worker(new URL("./fs-worker.mjs", import.meta.url));
-  let onKernelFsMessage = () => {};
-  await new Promise((resolve) => {
-    fsWorker.on("message", (m) => {
-      if (m.type === "ready") resolve();
-      else onKernelFsMessage(m);
-    });
-  });
-  const kernelFs = createKernelFs(fsWorker);
-  onKernelFsMessage = kernelFs.onMessage;
+  const filesystem = await createHeadlessFilesystem();
+  const kernelFs = { fs: filesystem.fs };
 
   const spawnWorker = (info) => {
     const worker = new Worker(new URL("./process-worker.mjs", import.meta.url));
@@ -90,7 +79,7 @@ async function makeKernel() {
       if (handler) handler(m);
     });
     const { port1, port2 } = new MessageChannel();
-    fsWorker.postMessage({ type: "fs-register", client: info.pid, sab: info.sab, port: port2 }, [port2]);
+    filesystem.server.register(info.pid, info.sab, port2);
     // #16 stage 2b: a spawned thread also receives its parentPort (a MessagePort
     // transferred from its creator through us) alongside its fs doorbell.
     const init = { type: "init", sab: info.sab, spec: info.spec, fsPort: port1 };
@@ -101,7 +90,8 @@ async function makeKernel() {
     return {
       terminate: () => {
         worker.terminate();
-        fsWorker.postMessage({ type: "fs-unregister", client: info.pid });
+        filesystem.server.unregister(info.pid);
+        port2.close();
       },
       postMessage: (m) => worker.postMessage(m),
     };

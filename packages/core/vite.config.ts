@@ -20,6 +20,33 @@ function bundleServiceWorker(): Plugin {
   };
 }
 
+// The official SQLite package contains optional standalone and OPFS-proxy worker
+// front doors. We use neither: SQL and persistence are kernel-owned. Remove these
+// constructor sites during compilation (not by editing dependency/generated
+// files), so static emitted-asset inventories cannot treat them as active roles.
+// Preserve the upstream module/license; fail closed if its pinned glue changes.
+function kernelOnlySqlite(): Plugin {
+  return {
+    name: "vivari-kernel-only-sqlite",
+    enforce: "pre",
+    transform(code, id) {
+      if (!id.includes("@sqlite.org/sqlite-wasm/")) return;
+      let site: RegExp;
+      if (id.endsWith("/sqlite3-bundler-friendly.mjs")) {
+        site = /new Worker\(\s*new URL\('sqlite3-opfs-async-proxy\.js', import\.meta\.url\),\s*\)/g;
+      } else if (id.endsWith("/sqlite3-worker1-promiser.mjs")) {
+        site = /new Worker\(\s*new URL\('sqlite3-worker1-bundler-friendly\.mjs', import\.meta\.url\),\s*\{\s*type: 'module',\s*\},\s*\)/g;
+      } else return;
+      const matches = code.match(site);
+      if (matches?.length !== 1) throw new Error(`Unexpected SQLite worker glue in ${id}`);
+      return {
+        code: code.replace(site, "(() => { throw new Error('Auxiliary SQLite workers are unavailable: the Vivari kernel owns SQL and persistence'); })()"),
+        map: null,
+      };
+    },
+  };
+}
+
 // Library build for @vivari/core.
 //
 // The public entry (`src/index.ts`) only pulls in framework-agnostic TS. The
@@ -35,7 +62,7 @@ function bundleServiceWorker(): Plugin {
 export default defineConfig({
   // Worker/WASM URLs stay relative to the distribution mount.
   base: "./",
-  plugins: [bundleServiceWorker()],
+  plugins: [bundleServiceWorker(), kernelOnlySqlite()],
   build: {
     target: "es2022",
     outDir: "dist",
@@ -57,5 +84,5 @@ export default defineConfig({
       },
     },
   },
-  worker: { format: "es" },
+  worker: { format: "es", plugins: () => [kernelOnlySqlite()] },
 });

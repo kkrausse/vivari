@@ -125,7 +125,7 @@ export function createSyscalls({ ctrl, data, notify, onSignal = null }) {
     exists: (p) => call(OP_EXISTS, encodeRequest([b(p)]))[0] === 1,
     readdir: (p) => {
       const t = decodeBytes(call(OP_READDIR, encodeRequest([b(p)])));
-      return t.length ? t.split("\n") : [];
+      return JSON.parse(t);
     },
     mkdir: (p, recursive) =>
       call(OP_MKDIR, encodeRequest([b(p)], recursive ? FLAG_RECURSIVE : 0)),

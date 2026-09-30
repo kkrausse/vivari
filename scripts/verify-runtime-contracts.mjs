@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Worker, MessageChannel } from "node:worker_threads";
 import { Kernel } from "../packages/kernel-host/kernel.js";
-import { createKernelFs } from "../packages/kernel-host/kernel-fs.js";
+import { createHeadlessFilesystem } from "./lib/kernel-filesystem.mjs";
 
 const contracts = {
   "worker-uncloneable": "WORKER_UNCLONEABLE_PASS",
@@ -30,15 +30,8 @@ const deadline = setTimeout(() => {
   process.exit(1);
 }, 60_000);
 try {
-  const fsWorker = new Worker(new URL("./fs-worker.mjs", import.meta.url));
-  workers.add(fsWorker);
-  let dispatch = () => {};
-  await new Promise((resolve, reject) => {
-    fsWorker.once("error", reject);
-    fsWorker.on("message", message => message.type === "ready" ? resolve() : dispatch(message));
-  });
-  const bridge = createKernelFs(fsWorker);
-  dispatch = bridge.onMessage;
+  const filesystem = await createHeadlessFilesystem();
+  const bridge = { fs: filesystem.fs };
   const kernel = new Kernel({
     fs: bridge.fs,
     stdout: text => process.stdout.write(text),
@@ -53,7 +46,7 @@ try {
         kernel.stop(info.pid);
       });
       const { port1, port2 } = new MessageChannel();
-      fsWorker.postMessage({ type: "fs-register", client: info.pid, sab: info.sab, port: port2 }, [port2]);
+      filesystem.server.register(info.pid, info.sab, port2);
       const init = { type: "init", sab: info.sab, spec: info.spec, fsPort: port1 };
       const transfer = [port1];
       if (info.threadPort) { init.threadPort = info.threadPort; transfer.push(info.threadPort); }
@@ -63,7 +56,8 @@ try {
         terminate() {
           // Keep the worker in the set so final cleanup awaits termination.
           void worker.terminate();
-          fsWorker.postMessage({ type: "fs-unregister", client: info.pid });
+          filesystem.server.unregister(info.pid);
+          port2.close();
         },
       };
     },

@@ -18,7 +18,11 @@ export class Host {
   readonly serviceWorkerUrl: string;
   private constructor(workerUrl: string, serviceWorkerUrl: string) {
     this.serviceWorkerUrl = serviceWorkerUrl;
-    this.worker = new Worker(workerUrl, { type: "module", name: "Workspace storage supervisor" });
+    const kernelUrl = new URL(workerUrl, location.href);
+    // Supported sqlite-wasm opt-out: persistence is already owned by the kernel,
+    // so its independent OPFS proxy worker must never be started.
+    kernelUrl.searchParams.set("opfs-disable", "");
+    this.worker = new Worker(kernelUrl, { type: "module", name: "Workspace storage supervisor" });
     this.worker.onmessage = ({ data: m }: MessageEvent<Message>) => {
       if (m.type === "listen") this.listeners.set(Number(m.port), String(m.listenerId));
       if (m.type === "unlisten") this.listeners.delete(Number(m.port));

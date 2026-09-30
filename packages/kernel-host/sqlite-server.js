@@ -1,4 +1,4 @@
-// One live connection per VFS pathname; all SQL executes in the FS worker.
+// One live connection per VFS pathname; all SQL executes in the kernel owner.
 // Process workers use the synchronous SAB; commits acknowledge persistence flush.
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 

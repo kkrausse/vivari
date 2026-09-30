@@ -1,21 +1,10 @@
 // @ts-nocheck — authored in TS for Vite's native worker bundling, but not strictly
 // type-checked: it imports the generated wasm VFS + untyped kernel-host JS. esbuild
 // (via Vite) is the compiler; strict typing is a separate, larger effort.
-// The File System Worker (Phase 2 #14), browser side.
-//
-// It owns the single Rust/Wasm VirtualFileSystem and nothing else. The kernel
-// used to hold the VFS and service every fs syscall on its own thread; now that
-// work happens here, off the kernel's critical path. Each client (the kernel and
-// every process) shares its SAB with us; a doorbell tells us which one has a
-// request pending and FsServer runs it against the VFS and wakes the caller.
-//
-// Spawned as a *nested* worker from the kernel worker, like the Fetcher Worker.
-//
-// Persistence (OPFS): this worker is also where the VFS is mirrored to the
-// Origin Private File System so a project survives reload. OPFS sync access
-// handles are only available inside a Worker — this one — which is exactly why
-// the adapter lives here. On boot we restore the manifest into the VFS BEFORE
-// serving any syscall; afterwards FsServer forwards mutations to the adapter.
+// Kernel-owned VFS and persistence. This is a module, never a worker entry.
+// Guests ring FsServer's MessagePorts while parked on their own SAB. Kernel
+// housekeeping uses a direct facade and can never wait for itself. OPFS restore
+// and SQLite initialization complete before this factory exposes the service.
 
 import initKernel, { VirtualFileSystem } from "../../../vfs/pkg/vivari_vfs.js";
 import { FsServer } from "../../../kernel-host/fs-server.js";
@@ -24,14 +13,16 @@ import { createDepCache } from "../../../kernel-host/dep-cache.js";
 import { createSqliteServer } from "../../../kernel-host/sqlite-server.js";
 import { installTree, installTreeImage } from "../../../kernel-host/install-tree.js";
 
-const post = (type, extra) => self.postMessage({ type, ...extra });
+import { createDirectKernelFs } from "../../../kernel-host/direct-kernel-fs.js";
+
+export async function createKernelFilesystem({ emit, compression = true }) {
+const post = (type, extra) => emit({ type, ...extra });
 
 let server = null;
 let vfsRef = null; // the live VFS, set as soon as it's constructed (pre-restore)
 let depCache = null; // lockfile-keyed node_modules snapshot cache (P1)
 let accessRef = null; // the vfs-bound facade, shared by persistence + dep cache
-let compressionOn = false; // whole-file lazy compression gate (URL ?compress=1)
-const queue = []; // messages that arrive before the VFS finishes booting
+let compressionOn = compression;
 let persistenceState = { status: "opening" };
 
 // Apply the current compression gate to the VFS. Guarded so an older wasm build
@@ -80,121 +71,16 @@ function handle(msg) {
     case "workspace-persistence":
       post("vv-reply", { reqId: msg.reqId, ok: true, persistence: persistenceState });
       break;
-    case "fs-register":
-      server.register(msg.client, msg.sab, msg.port || null);
-      break;
-    case "fs-unregister":
-      server.unregister(msg.client);
-      break;
-    case "fs": // the kernel's own doorbell (processes use their MessagePort)
-      server.service(msg.client);
-      break;
-    case "fs-write-large":
-      try {
-        server.writeLarge(msg.path, new Uint8Array(msg.buffer, msg.byteOffset || 0, msg.byteLength));
-        post("fs-write-large-ok", { id: msg.id });
-      } catch (err) {
-        post("fs-write-large-err", { id: msg.id, error: String(err?.message || err) });
-      }
-      break;
-    case "fs-write-batch":
-      try {
-        const n = server.writeBatch(msg.entries, msg.buffer);
-        post("fs-write-batch-ok", { id: msg.id, count: n });
-      } catch (err) {
-        post("fs-write-batch-err", { id: msg.id, error: String(err?.message || err) });
-      }
-      break;
     case "fs-flush": // page is hiding — best-effort force the mirror to disk
       if (server && server.persistence) server.persistence.flush().catch(error => post("log", { line: String(error) }));
       break;
-    case "fs-mem": {
-      // Diagnostic: report the VFS's in-RAM content footprint (see the studio's
-      // memory readout). Guarded so an older wasm build without mem_bytes/
-      // file_count still answers (with -1) instead of throwing.
-      const vfs = server && server.vfs;
-      const bytes = vfs && typeof vfs.mem_bytes === "function" ? vfs.mem_bytes() : -1;
-      const files = vfs && typeof vfs.file_count === "function" ? vfs.file_count() : -1;
-      // Logical (uncompressed) footprint, so the readout can show the ratio.
-      const logical =
-        vfs && typeof vfs.logical_mem_bytes === "function" ? vfs.logical_mem_bytes() : -1;
-      post("fs-mem", { id: msg.id, bytes, files, logical });
-      break;
-    }
     case "fs-set-compression":
       compressionOn = !!msg.on;
       applyCompression();
       break;
-    // ---- persistent dependency cache (P1) ---------------------------------
-    // node_modules snapshots keyed by lockfile. These run against the in-worker
-    // VFS + OPFS, so like writeLarge/writeBatch they answer over postMessage
-    // (the kernel-fs client correlates the reply by id).
-    case "dep-cache-has":
-      (async () => {
-        try {
-          post("dep-cache-has-ok", { id: msg.id, has: depCache ? await depCache.has(msg.key) : false });
-        } catch (err) {
-          post("dep-cache-has-err", { id: msg.id, error: String(err?.message || err) });
-        }
-      })();
-      break;
-    case "dep-cache-save":
-      (async () => {
-        try {
-          const res = depCache ? await depCache.save(msg.key, msg.dir, msg.aliases || []) : null;
-          post("dep-cache-save-ok", { id: msg.id, result: res });
-        } catch (err) {
-          post("dep-cache-save-err", { id: msg.id, error: String(err?.message || err) });
-        }
-      })();
-      break;
-    // Take in a snapshot the app SHIPS (built by running the install at build time)
-    // so a first run on a fresh origin can restore instead of installing. The bytes
-    // are fetched by the kernel worker, which owns network access; the store
-    // validates them (see importArchive) and answers null on anything malformed, so
-    // a truncated or wrong asset degrades to a normal install.
-    case "dep-cache-import":
-      (async () => {
-        try {
-          const res = depCache
-            ? await depCache.importArchive(msg.key, msg.archive, msg.aliases || [], { shipped: true })
-            : null;
-          post("dep-cache-import-ok", { id: msg.id, result: res });
-        } catch (err) {
-          post("dep-cache-import-err", { id: msg.id, error: String(err?.message || err) });
-        }
-      })();
-      break;
-    case "dep-cache-restore":
-      (async () => {
-        try {
-          // Mirror every restored path through the write-behind store so the
-          // cache-restored node_modules survives a reload exactly like one a real
-          // install produced (which FsServer would have mirrored per-mutation).
-          const onPath = server && server.persistence ? (p) => server.persistence.onWrite(p) : undefined;
-          const count = depCache ? await depCache.restore(msg.key, msg.dir, onPath) : 0;
-          post("dep-cache-restore-ok", { id: msg.id, count });
-        } catch (err) {
-          post("dep-cache-restore-err", { id: msg.id, error: String(err?.message || err) });
-        }
-      })();
-      break;
   }
 }
 
-self.onmessage = (event) => {
-  const d = event.data;
-  // The compression gate can arrive before the VFS finishes booting; honor it
-  // immediately (and again once the VFS exists) so it takes effect before the
-  // OPFS restore, letting restored files compress on write.
-  if (d && d.type === "fs-set-compression") {
-    compressionOn = !!d.on;
-    applyCompression();
-    return;
-  }
-  if (server) handle(d);
-  else queue.push(d);
-};
 
 // A small vfs-bound facade the OPFS adapter uses to read current state and to
 // replay a restore. Keeps the adapter free of any wasm-VFS dependency.
@@ -351,7 +237,6 @@ async function createOpfsDepStorage() {
   };
 }
 
-(async () => {
   // Pass the wasm URL explicitly instead of relying on the glue's default
   // `new URL('..._bg.wasm', import.meta.url)`. When this worker is bundled the
   // glue is inlined here, so its default would resolve next to the bundle
@@ -398,6 +283,7 @@ async function createOpfsDepStorage() {
         });
     }
   } catch (err) {
+    persistence?.releaseOwnership();
     post("log", { line: "  [opfs] persistence unavailable: " + (err?.message || err), cls: "muted" });
     persistenceState = { status: "failed", error: String(err?.message || err) };
     persistence = null;
@@ -428,6 +314,6 @@ async function createOpfsDepStorage() {
   // cost to peak residency — and the kernel cannot see the read, which happens
   // here over the SAB.
   server.onBodyConsumed = (path) => post("fetch-body-consumed", { path });
-  post("ready");
-  for (const msg of queue.splice(0)) handle(msg);
-})();
+  const fs = createDirectKernelFs(server, depCache);
+  return { server, fs, handle };
+}

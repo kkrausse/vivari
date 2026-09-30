@@ -1,5 +1,68 @@
 # Vivari — Architecture
 
+> **Single-kernel experimental fork (2026-09-30).** The normative topology for
+> this branch is the section below. Subsequent upstream descriptions of the old
+> File System/Fetcher workers are retained historical context, not this branch's
+> browser topology.
+
+## Single-kernel topology and ownership
+
+The browser main thread is an SDK/UI/message relay. It starts **one Kernel Worker**
+which owns the Rust/Wasm VFS, FsServer, SQLite service, OPFS ownership Web Lock,
+dependency snapshots, PID table, all process/workspace lifecycle, outbound fetch,
+HTTP listener generations, streaming request/response credit and cancellation.
+Only PID-owned **Process Workers** are nested under that kernel. The browser
+Service Worker remains a necessary HTTP relay, not a second runtime authority.
+
+`kernel-filesystem.ts` is an explicit awaited factory, not a worker entry. It
+initializes Wasm with an explicit URL, sets compression before OPFS restore,
+acquires the existing ownership lock, finishes restore, opens the dependency
+cache, installs FsServer and SQLite, then returns. OPFS initialization/restore
+failures release ownership; successful ownership lasts until kernel termination.
+The existing delete/recreate persistence queue is unchanged.
+
+Each guest retains its SAB and synchronous filesystem client; its MessagePort
+doorbell now terminates at `FsServer.register(pid, sab, port)` **inside the kernel**.
+Kernel housekeeping uses `createDirectKernelFs`: direct unrestricted VFS reads,
+shared FsServer mutation dispatch (watch/persistence notifications), and local
+async cache operations. There is no kernel filesystem SAB, response correlation,
+transfer/ack path, or Atomics.wait. Deferred guest spawn/fetch/SQLite responses
+yield to the host; never serialize kernel messages behind work needing guest
+callbacks. The kernel cannot synchronously wait for a guest that may call it.
+
+The fork changes OP_READDIR's response payload from newline-delimited UTF-8 to
+a UTF-8 JSON array of names, preserving embedded-newline entries. All shipped
+guest and retained legacy filesystem clients were updated together; opcode/SAB
+layout and public host ABI remain unchanged. Do not mix old guest bundles with
+the fork's FsServer.
+
+`kernel-fetch.ts` performs asynchronous fetch/body delivery locally, preserving
+registry aliases, synthetic packuments, host alias and egress header policy.
+HTTP control/routing already lived in Kernel and retains its protocol unchanged.
+The fork deliberately disables the optional non-PID Python editor language-service
+worker; Python guest processes remain available. Both SDK launchers apply
+sqlite-wasm's supported `opfs-disable` worker URL parameter to disable its otherwise
+automatic auxiliary OPFS proxy. Custom kernel launchers must preserve that flag.
+Diagnostic `vv-diag` reports the
+actual registered process worker PIDs and the single-kernel ownership model.
+The core build additionally removes SQLite's two unused optional helper-worker
+constructor sites with a fail-closed, count-checked Vite source transform, so
+the distribution's reachable worker graph contains no SQLite helper assets.
+
+`scripts/lib/spike-harness.mjs`, `verify-node.mjs` and
+`verify-runtime-contracts.mjs` now own the VFS locally too. Legacy individual
+spikes and the historical completion regression still retain their old isolated
+FS-worker fixtures; their success alone is not evidence of this topology.
+`node scripts/test-single-kernel.mjs` asserts the sole nested worker constructor
+and drives real guest execSync/child filesystem, >1MiB binary reads, SQLite,
+HTTP-handler sync filesystem with host writes and termination cleanup.
+
+Baseline: exact `446df00f86d5d6d5d856a2e5deec0fac49f242fa`, preserving all
+licenses and native source. Build/reuse provenance is in
+`docs/single-kernel-build.md`. Browser persistence/reload and HTTP stream credit
+qualification belongs to the isolated toolkit consumer; headless checks do not
+claim those browser properties.
+
 This document explains how Vivari works end to end: the core constraint it
 solves, the worker topology, the syscall protocol, the filesystem, the process
 model, the Node runtime, networking, native code, and the build. It is the

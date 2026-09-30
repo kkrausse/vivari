@@ -11401,3 +11401,14 @@ process in a tree that is serving right now.
   it runs the failing gate in the working tree before blaming the checkout, having once
   blamed absent build output for three stale assertions — but a gate whose assertions are
   skipped rather than failed still reads as green from the outside.
+# 2026-09-30 — Experimental single-kernel runtime
+
+Forked exact clean completion baseline 446df00, not a moving sibling checkout.
+Moved browser VFS/OPFS/SQLite/cache service into the Kernel Worker and removed
+dedicated filesystem/fetcher worker entries. Supervisor fs housekeeping is direct
+and never parks; guest SAB/doorbell protocol remains synchronous across real
+workers. Fetch aliases/egress policy and existing Kernel-owned HTTP protocol remain.
+Disabled optional untracked Python LSP worker to keep a strict PID-owned topology.
+Migrated shared headless spike, general verification and fork contract harnesses
+to local VFS ownership; added deadline-backed topology/deadlock/binary/SQLite/HTTP
+contracts. Browser reload/stream qualification is separate toolkit work.

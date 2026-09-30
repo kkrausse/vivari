@@ -1,5 +1,16 @@
 # AGENTS.md
 
+## Experimental single-kernel branch
+
+Read the normative single-kernel section at the top of ARCHITECTURE.md. The old
+FS/Fetcher worker descriptions below are upstream history. Browser ownership is
+one Kernel Worker + PID-owned guest workers + Service Worker relay. Edit
+`packages/core/src/workers/kernel-filesystem.ts` and `kernel-fetch.ts`, not removed
+worker entries. Kernel fs access uses `direct-kernel-fs.js`, never a same-thread
+`createKernelFs` facade or Atomics.wait. Guest waits must remain predicate waits.
+Run `node scripts/test-single-kernel.mjs` and the migrated runtime contracts.
+Python editor LSP is explicitly unavailable in this fork (no non-PID worker).
+
 Guidance for AI agents (and humans) working in this repo. Read this first, then
 read [`ARCHITECTURE.md`](./ARCHITECTURE.md) before touching the runtime, the
 protocol, or networking. [`roadmap.md`](./roadmap.md) is the chronological log of

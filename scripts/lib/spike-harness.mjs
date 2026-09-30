@@ -32,7 +32,7 @@
 //   const r = await httpGet(h.kernel, 3000, "/");
 
 import { Kernel } from "../../packages/kernel-host/kernel.js";
-import { createKernelFs } from "../../packages/kernel-host/kernel-fs.js";
+import { createHeadlessFilesystem } from "./kernel-filesystem.mjs";
 import { stubNodeGyp } from "../../packages/kernel-host/node-gyp-stub.js";
 import { applyRealNpmShims } from "../../packages/kernel-host/load-real-npm.js";
 import { initTransferList } from "../../packages/kernel-host/worker-transfer.js";
@@ -55,16 +55,8 @@ export const VFS_NPM = "/usr/lib/node_modules/npm";
  * Guest output lands in `h.out` (and echoes to stderr when VV_LIVE=1).
  */
 export async function bootSpikeKernel({ npm = false } = {}) {
-  const fsWorker = new Worker(new URL("../fs-worker.mjs", import.meta.url));
-  let onKernelFsMessage = () => {};
-  await new Promise((resolve) => {
-    fsWorker.on("message", (m) => {
-      if (m.type === "ready") resolve();
-      else onKernelFsMessage(m);
-    });
-  });
-  const kernelFs = createKernelFs(fsWorker);
-  onKernelFsMessage = kernelFs.onMessage;
+  const filesystem = await createHeadlessFilesystem();
+  const kernelFs = { fs: filesystem.fs };
 
   const spawnWorker = (info) => {
     const w = new Worker(new URL("../process-worker.mjs", import.meta.url));
@@ -85,7 +77,7 @@ export async function bootSpikeKernel({ npm = false } = {}) {
       process.stderr.write(`\n[worker-error pid ${info.pid}] ${(e && e.stack) || e}\n`);
     });
     const { port1, port2 } = new MessageChannel();
-    fsWorker.postMessage({ type: "fs-register", client: info.pid, sab: info.sab, port: port2 }, [port2]);
+    filesystem.server.register(info.pid, info.sab, port2);
     const init = { type: "init", sab: info.sab, spec: info.spec, fsPort: port1 };
     if (info.threadPort) init.threadPort = info.threadPort;
     // A worker pool (tinypool, piscina, synckit) puts a MessagePort in workerData;
@@ -94,7 +86,8 @@ export async function bootSpikeKernel({ npm = false } = {}) {
     return {
       terminate: () => {
         w.terminate();
-        fsWorker.postMessage({ type: "fs-unregister", client: info.pid });
+        filesystem.server.unregister(info.pid);
+        port2.close();
       },
       postMessage: (m) => w.postMessage(m),
     };
@@ -122,6 +115,7 @@ export async function bootSpikeKernel({ npm = false } = {}) {
   };
 
   kernel.mkdirp("/home/user");
+  kernel.mkdirp("/tmp");
 
   // Copy the vendored real npm tree into the VFS and put it on PATH. Idempotent,
   // and the ONLY thing in this file that touches a registry-provisioned
@@ -175,7 +169,7 @@ export async function bootSpikeKernel({ npm = false } = {}) {
 
   // kernelFs is the FS client the kernel was built on — spike-dep-cache drives
   // its depCache* methods directly, since those are what it exists to prove.
-  const h = { kernel, kernelFs, out, listening, VFS_NPM, loadRealNpm };
+  const h = { kernel, kernelFs, filesystem, out, listening, VFS_NPM, loadRealNpm };
   if (npm) loadRealNpm();
   return h;
 }

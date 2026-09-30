@@ -31,6 +31,7 @@
     "preview:studio": "cd packages/studio && bun run preview",
     "verify": "node scripts/verify-node.mjs",
     "test:kernel-fs-completion": "node scripts/test-kernel-fs-completion.mjs",
+    "test:single-kernel": "node scripts/test-single-kernel.mjs",
     "smoke": "node scripts/smoke-sdk.mjs",
     "probe:node-registry": "node scripts/probe-node-registry.mjs",
     "probe:egress-headers": "node scripts/probe-egress-headers.mjs",

@@ -233,7 +233,7 @@ export function createKernelFs(fsWorker) {
     },
     readdir(path) {
       const s = decodeBytes(call(OP_READDIR, encodeRequest([enc(path)])));
-      return s ? s.split("\n").filter(Boolean) : [];
+      return JSON.parse(s);
     },
     stat(path) {
       return JSON.parse(decodeBytes(call(OP_STAT, encodeRequest([enc(path)]))));
