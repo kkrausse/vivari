@@ -49,6 +49,17 @@ The core build additionally removes SQLite's two unused optional helper-worker
 constructor sites with a fail-closed, count-checked Vite source transform, so
 the distribution's reachable worker graph contains no SQLite helper assets.
 
+Review corrections: `KernelBridge` imports Vite's `?worker&url` asset and uses
+`URL.searchParams` for the SQLite opt-out, preserving source-mode worker_file/type
+queries as well as built asset URLs. Durable dependency snapshots open only after
+the VFS mirror successfully acquires and retains ownership; SQLite initialization
+failure releases that ownership before failing boot. FsServer reports whole-file
+fetch-body consumption only after accepting the response into the SAB. An EFBIG
+rejection retains the evicted body's pin for an exact chunked-fd retry; successful
+fd close reclaims it. Unrestricted kernel-local reads still report consumption
+directly. `test:single-kernel-review` exercises the real Vite dev transformation,
+owner gating/backend failure injection, and the real Rust VFS/guest retry schedule.
+
 `scripts/lib/spike-harness.mjs`, `verify-node.mjs` and
 `verify-runtime-contracts.mjs` now own the VFS locally too. Legacy individual
 spikes and the historical completion regression still retain their old isolated

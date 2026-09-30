@@ -21,6 +21,7 @@
 
 import { VivariError } from "./errors.js";
 import type { KernelMessage, Unsubscribe } from "./types.js";
+import kernelWorkerUrl from "./workers/kernel-worker.ts?worker&url";
 
 type Handler = (m: KernelMessage) => void;
 
@@ -153,10 +154,12 @@ export class KernelBridge {
       this.previewMode = "same-origin";
     }
     this.previewPopout = options.previewPopout === "isolated" ? "isolated" : "same-origin";
+    // Vite's worker-url import supports both source dev and emitted assets.
+    // Preserve dev's worker_file/type query instead of appending a second '?'.
+    const kernelUrl = new URL(kernelWorkerUrl, import.meta.url);
+    kernelUrl.searchParams.set("opfs-disable", "");
     this.worker = new Worker(
-      // Keep the query outside Vite's transformed URL: otherwise it is removed.
-      // SQLite's upstream OPFS proxy is redundant with our kernel-owned mirror.
-      new URL("./workers/kernel-worker.ts", import.meta.url).href + "?opfs-disable",
+      kernelUrl,
       { type: "module", name: options.workerName ?? "Vivari Kernel" },
     );
     this.worker.onmessage = (event: MessageEvent<KernelMessage>) => {

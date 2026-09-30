@@ -11403,6 +11403,14 @@ process in a tree that is serving right now.
   skipped rather than failed still reads as green from the outside.
 # 2026-09-30 — Experimental single-kernel runtime
 
+Source-review follow-up: preserve Vite source worker URL query parameters when
+disabling SQLite's optional proxy; avoid releasing evicted fetch-body pins on
+oversized SAB reads before their fd retry; gate shared durable snapshots on VFS
+ownership; release ownership if required SQLite initialization fails. Added
+real-Vite and real-worker/Rust-VFS regression checks plus injected backend cleanup
+checks. Shared emitted output is intentionally untouched while the integration
+agent qualifies the frozen first checkpoint; follow-up source requires rebuild.
+
 Forked exact clean completion baseline 446df00, not a moving sibling checkout.
 Moved browser VFS/OPFS/SQLite/cache service into the Kernel Worker and removed
 dedicated filesystem/fetcher worker entries. Supervisor fs housekeeping is direct

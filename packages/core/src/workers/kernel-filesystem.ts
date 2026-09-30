@@ -14,6 +14,7 @@ import { createSqliteServer } from "../../../kernel-host/sqlite-server.js";
 import { installTree, installTreeImage } from "../../../kernel-host/install-tree.js";
 
 import { createDirectKernelFs } from "../../../kernel-host/direct-kernel-fs.js";
+import { initializeKernelBackends } from "../../../kernel-host/kernel-backends.js";
 
 export async function createKernelFilesystem({ emit, compression = true }) {
 const post = (type, extra) => emit({ type, ...extra });
@@ -289,22 +290,22 @@ async function createOpfsDepStorage() {
     persistence = null;
   }
 
-  // Persistent dependency cache (P1): OPFS-backed node_modules snapshots keyed by
-  // lockfile. Independent of the write-behind mirror above — if it fails to
-  // initialize we simply have no dep cache (installs run as before).
-  try {
-    if (typeof navigator !== "undefined" && navigator.storage && navigator.storage.getDirectory) {
+  // Durable snapshots share the VFS owner lock. Never open shared cache storage
+  // after ownership refusal or a restore failure that released that lock.
+  const backends = await initializeKernelBackends(persistence, {
+    async openDepCache() {
       const storage = await createOpfsDepStorage();
-      depCache = await createDepCache({ access: accessRef, storage });
+      const cache = await createDepCache({ access: accessRef, storage });
       post("log", { line: "  [depcache] ready", cls: "muted" });
-    }
-  } catch (err) {
-    post("log", { line: "  [depcache] unavailable: " + (err?.message || err), cls: "muted" });
-    depCache = null;
-  }
+      return cache;
+    },
+    openSqlite: () => createSqliteServer(vfs, persistence),
+    onDepCacheError: err => post("log", { line: "  [depcache] unavailable: " + (err?.message || err), cls: "muted" }),
+  });
+  depCache = backends.depCache;
 
   server = new FsServer(vfs, persistence);
-  server.sqlite = await createSqliteServer(vfs, persistence);
+  server.sqlite = backends.sqlite;
   server.onMutation = (path) => post("vv-fs-changed", { path });
   if (persistenceState.status === "opening") persistenceState = { status: "ephemeral", reason: "OPFS unavailable" };
   post("workspace-persistence", persistenceState);

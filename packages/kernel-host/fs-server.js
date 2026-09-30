@@ -256,6 +256,12 @@ export class FsServer {
         return;
       }
       data.set(bytes, 0);
+      // Release only after accepting/copying the entire body into the response.
+      // An oversized read must retain its pin for the caller's chunked-fd retry.
+      if (opcode === OP_READ_FILE && this.onBodyConsumed) {
+        const path = decodeBytes(fields[0]);
+        if (isFetchBody(path)) this.onBodyConsumed(path);
+      }
       Atomics.store(ctrl, I_RES_LEN, bytes.length);
       Atomics.store(ctrl, I_STATE, STATE_RESPONSE_OK);
       Atomics.notify(ctrl, I_STATE);
@@ -321,8 +327,8 @@ export class FsServer {
       case OP_READ_FILE: {
         const path = s(0);
         const bytes = vfs.read_file(path);
-        // Whole-file read: the reader is done the moment this returns.
-        if (this.onBodyConsumed && isFetchBody(path)) this.onBodyConsumed(path);
+        // The SAB service must validate response size before reporting consumption.
+        // Kernel-local unrestricted reads report consumption in direct-kernel-fs.
         return bytes;
       }
       case OP_WRITE_FILE: {

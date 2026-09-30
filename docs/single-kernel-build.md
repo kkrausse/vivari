@@ -65,3 +65,20 @@ Verification at the first implementation milestone:
   silently declared passing or fixed by changing the selected source baseline.
 - Browser persistence/reload, stream credits and actual worker census are pending
   isolated consumer qualification; no retained browser sessions were targeted.
+
+## Source-review follow-up (requires coordinated rebuild)
+
+The follow-up source fixes query-safe Vite `?worker&url` launch/SQLite opt-out,
+oversized fetched-body response pin lifetime, owner-gated durable snapshots and
+required SQLite backend initialization ownership cleanup. Its focused check is
+`node scripts/test-single-kernel-review.mjs`: PASS with actual Vite source-mode
+transform/request, injected backend failures, and a real guest SAB read against
+Rust VFS (EFBIG retains pin/body, fd retry verifies every byte, close frees it).
+`node scripts/test-single-kernel.mjs`, full `verify-node.mjs`, and
+`bunx tsc -p packages/core/tsconfig.build.json --noEmit` also PASS.
+
+No `packages/core/dist` files were rebuilt during that follow-up. Its currently
+retained emitted output remains the first `e14ea7d` checkpoint, not the follow-up
+source. Rebuild and regenerate the consumer receipt together before qualification
+of the follow-up. Source-mode `KernelBridge` now uses supported Vite worker asset
+imports rather than appending a second `?` to Vite's existing worker query.

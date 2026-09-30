@@ -1459,7 +1459,7 @@ async function boot() {
     const result = await doFetch(url, init);
     return { ...result, body: new Uint8Array(result.body) };
   };
-  const kernelFs = { fs: filesystem.fs, onMessage: () => {} };
+  const kernelFs = { fs: filesystem.fs };
   kernelFsRef = kernelFs;
   post("log", { line: `  [boot] file system ready (+${Date.now() - t0}ms).`, dim: true });
   // OPFS restore (the long pole) is done; the remaining steps before the UI
