@@ -55,6 +55,7 @@ import {
 import { DBG_SAB_BYTES, makeDebugViews, writeDebugCommand } from "../protocol/debug.js";
 import { COREUTILS } from "./coreutils.js";
 import { CookieJar } from "./cookie-jar.js";
+import { createSyscallTrace, sampleSyscallControl } from "./syscall-trace.js";
 
 const EMPTY = new Uint8Array(0);
 
@@ -292,6 +293,7 @@ export class Kernel {
     this.lazyLoaders = new Map(); // command name -> async loader fn (shared per asset)
     this.lazyNotices = new Map(); // command name -> one-line "loading on first use" notice
     this.lazyInflight = new Map(); // loader fn -> Promise (dedupe concurrent first-uses)
+    this.syscallTrace = createSyscallTrace();
   }
 
   // ---- lazy (on-demand) program registry ------------------------------------
@@ -573,6 +575,7 @@ export class Kernel {
       this.debugPaused.add(pid);
     }
 
+    this.syscallTrace.record(pid, "process-worker-before", ctrl);
     proc.handle = this.spawnWorker({
       pid,
       sab,
@@ -888,6 +891,7 @@ export class Kernel {
         sinceOutputMs: now - p.lastOutput,
         sinceSyscallMs: now - p.lastActivity,
         syscalls: p.syscalls,
+        syscallControl: sampleSyscallControl(p.ctrl),
         // Uncaught errors inside the worker: NOT deaths, but a flood of them is a
         // strong hint (see handleWorkerError).
         workerErrors: p.workerErrors,
@@ -906,6 +910,7 @@ export class Kernel {
       },
       listeners: [...this.listeners.keys()],
       pendingHttp: this.pendingHttp ? this.pendingHttp.size : 0,
+      syscallTrace: this.syscallTrace.snapshot(),
     };
   }
 
@@ -1106,6 +1111,7 @@ export class Kernel {
 
   // ---- syscall servicing ----------------------------------------------------
   respondOk(proc, bytes) {
+    this.syscallTrace.record(proc.pid, "kernel-response-ok-before", proc.ctrl);
     // A payload larger than the window used to surface as `RangeError: offset is
     // out of bounds` from deep inside Uint8Array.set, which killed the kernel and
     // named neither the syscall nor the size. Anything that can grow must spill
@@ -1122,6 +1128,7 @@ export class Kernel {
     Atomics.notify(proc.ctrl, I_STATE);
   }
   respondErr(proc, code) {
+    this.syscallTrace.record(proc.pid, "kernel-response-error-before", proc.ctrl);
     const bytes = encodeString(code);
     proc.data.set(bytes, 0);
     Atomics.store(proc.ctrl, I_RES_LEN, bytes.length);
@@ -1131,6 +1138,7 @@ export class Kernel {
 
   serviceSyscall(pid) {
     const proc = this.procs.get(pid);
+    this.syscallTrace.record(pid, "kernel-doorbell", proc?.ctrl);
     if (!proc) return;
     // A syscall proves the process is alive and doing work, but NOT that the user can
     // see anything — npm's reify writes ~12k files without printing a line. So it
@@ -1148,13 +1156,18 @@ export class Kernel {
     // typo in a guest script. The kernel is a trust boundary; a bad request has to
     // come back as an errno.
     try {
+      this.syscallTrace.record(pid, "kernel-dispatch-before", proc.ctrl, { dispatchedOpcode: opcode });
       const pending = this.dispatchSyscall(proc, opcode);
+      this.syscallTrace.record(pid, "kernel-dispatch-after", proc.ctrl, { dispatchedOpcode: opcode, pending: !!pending && typeof pending.then === "function" });
       // handleSpawn/handleSpawnAsync/handleFetch are async, so their failures
       // arrive as rejections and the try/catch above cannot see them. This is not
       // hypothetical: the spawn crash happened AFTER an await, which is why it
       // surfaced as an unhandled rejection rather than a caught throw.
       if (pending && typeof pending.then === "function") {
-        pending.then(undefined, (err) => this.failSyscall(proc, opcode, err));
+        pending.then(
+          () => this.syscallTrace.record(pid, "kernel-dispatch-settled", proc.ctrl, { dispatchedOpcode: opcode }),
+          (err) => this.failSyscall(proc, opcode, err),
+        );
       }
     } catch (err) {
       this.failSyscall(proc, opcode, err);
@@ -1172,6 +1185,7 @@ export class Kernel {
    * whatever syscall the guest makes next.
    */
   failSyscall(proc, opcode, err) {
+    this.syscallTrace.record(proc.pid, "kernel-dispatch-error", proc.ctrl, { dispatchedOpcode: opcode, errorName: err?.name });
     const detail = (err && err.stack) || String(err);
     try {
       this.stderr("[kernel] syscall " + opcode + " from pid " + proc.pid + " failed: " + detail + "\n", proc.pid);
@@ -1613,6 +1627,7 @@ export class Kernel {
   }
 
   async handleSpawn(parent, spec) {
+    this.syscallTrace.record(parent.pid, "spawn-enter", parent.ctrl);
     if (!spec || typeof spec !== "object") {
       this.respondErr(parent, "EINVAL");
       return;
@@ -1622,7 +1637,9 @@ export class Kernel {
     // it (fetch + unpack into the VFS) before resolving. The parent stays parked
     // on Atomics.wait meanwhile; the kernel loop keeps servicing other processes.
     // Pass the parent's pid so the "loading on first use" notice lands in its terminal.
+    this.syscallTrace.record(parent.pid, "spawn-load-before", parent.ctrl, { command: spec.command, lazy: this.lazyLoaders.has(spec.command) });
     await this.ensureCommandLoaded(spec.command, parent.pid);
+    this.syscallTrace.record(parent.pid, "spawn-load-after", parent.ctrl);
     // The parent may have exited (killed) while the tool was loading.
     if (!this.procs.has(parent.pid)) return;
     const programPath = this.resolveProgram(spec.command, cwd, spec.env || {});
@@ -1630,10 +1647,12 @@ export class Kernel {
       this.respondErr(parent, "ENOENT");
       return;
     }
+    this.syscallTrace.record(parent.pid, "spawn-create-before", parent.ctrl);
     const childPid = this.createProcess(
       { command: spec.command, programPath, args: spec.args || [], cwd, env: spec.env || {} },
       { parentPid: parent.pid, capture: !!spec.capture },
     );
+    this.syscallTrace.record(parent.pid, "spawn-create-after", parent.ctrl, { childPid });
     // A synchronously spawned child's stdin is settled at birth: `input` if the
     // caller passed any, and then EOF. Nothing else can ever arrive, because the
     // parent is parked on Atomics.wait until this child exits — so leaving the
@@ -1644,6 +1663,7 @@ export class Kernel {
     if (spec.input) this.sendStdin(childPid, b64ToBytes(spec.input));
     this.sendStdin(childPid, null);
     this.procs.get(childPid).onExit = (res) => {
+      this.syscallTrace.record(parent.pid, "spawn-child-exit", parent.ctrl, { childPid });
       this.respondOk(
         parent,
         encodeString(
@@ -1662,6 +1682,7 @@ export class Kernel {
   // running its event loop. The child streams stdout/stderr to the parent worker
   // (proc.stream) and, on exit, we post {type:'child-exit'} to the parent handle.
   async handleSpawnAsync(parent, spec) {
+    this.syscallTrace.record(parent.pid, "spawn-async-enter", parent.ctrl);
     if (!spec || typeof spec !== "object") {
       this.respondErr(parent, "EINVAL");
       return;
@@ -1670,7 +1691,9 @@ export class Kernel {
     // On-demand load of heavy tools before resolving (see handleSpawn). The {pid}
     // ack simply arrives once the tool is materialized on PATH. Pass the parent's
     // pid so the "loading on first use" notice lands in its terminal.
+    this.syscallTrace.record(parent.pid, "spawn-async-load-before", parent.ctrl, { command: spec.command, lazy: this.lazyLoaders.has(spec.command) });
     await this.ensureCommandLoaded(spec.command, parent.pid);
+    this.syscallTrace.record(parent.pid, "spawn-async-load-after", parent.ctrl);
     if (!this.procs.has(parent.pid)) return; // parent killed while loading
     const programPath = this.resolveProgram(spec.command, cwd, spec.env || {});
     if (!programPath) {
@@ -1678,6 +1701,7 @@ export class Kernel {
       return;
     }
     const parentPid = parent.pid;
+    this.syscallTrace.record(parent.pid, "spawn-async-create-before", parent.ctrl);
     const childPid = this.createProcess(
       {
         command: spec.command,
@@ -1691,6 +1715,7 @@ export class Kernel {
       },
       { parentPid, stream: true },
     );
+    this.syscallTrace.record(parent.pid, "spawn-async-create-after", parent.ctrl, { childPid });
     this.procs.get(childPid).onExit = (res) => {
       const p = this.procs.get(parentPid);
       if (p && p.handle && p.handle.postMessage) {

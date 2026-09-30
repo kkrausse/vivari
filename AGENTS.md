@@ -11,6 +11,12 @@ worker entries. Kernel fs access uses `direct-kernel-fs.js`, never a same-thread
 Run `node scripts/test-single-kernel.mjs` and the migrated runtime contracts.
 Python editor LSP is explicitly unavailable in this fork (no non-PID worker).
 
+For spawn routing failures, use normal `vv-diag`'s bounded `syscallTrace` and
+`syscallRouting.clients`/per-process `syscallControl` before requiring debugger
+pause frames. `syscalls: 1` alone does not identify the serviced opcode. Control
+samples are read-only and nontransactional; preserve original failed cohorts.
+`test:single-kernel-routing` verifies diagnostics using real guests and FS ports.
+
 Run `test:single-kernel-review` for the ownership/body-lifetime regressions. An
 oversized whole-file SAB response is NOT a consumed fetch body: retain its pin
 until the chunked-fd retry closes, or same-thread reclamation can turn EFBIG into

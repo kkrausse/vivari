@@ -33,6 +33,7 @@
     "test:kernel-fs-completion": "node scripts/test-kernel-fs-completion.mjs",
     "test:single-kernel": "node scripts/test-single-kernel.mjs",
     "test:single-kernel-review": "node scripts/test-single-kernel-review.mjs",
+    "test:single-kernel-routing": "node scripts/test-single-kernel-routing.mjs",
     "smoke": "node scripts/smoke-sdk.mjs",
     "probe:node-registry": "node scripts/probe-node-registry.mjs",
     "probe:egress-headers": "node scripts/probe-egress-headers.mjs",

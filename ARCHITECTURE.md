@@ -74,6 +74,21 @@ licenses and native source. Build/reuse provenance is in
 qualification belongs to the isolated toolkit consumer; headless checks do not
 claim those browser properties.
 
+Diagnostic checkpoint (not a spawn-hang fix): normal `vv-diag` includes a shared
+64-event `syscallTrace` ring, live per-process `syscallControl`, and
+`syscallRouting.clients` with separately sampled filesystem/kernel controls and
+actual SAB reference identity (`sameSab`). Browser worker syscall receipt,
+filesystem port receipt, dispatch/error/response, spawn entry/loading gate/child
+creation and init-post stages use one chronological sequence. No guest payload,
+environment, argv or stack is retained; command/error-name strings are capped at
+128 characters. Samples are independent atomic reads, not transactional request
+snapshots. Diagnostic reads never modify the SAB, acknowledge requests, retry work
+or wait on guest callbacks. A dispatch promise settling means its handler returned,
+not necessarily that a synchronous child exited. The ring survives process exit
+until overwritten or kernel termination. `test:single-kernel-routing` exercises
+actual guest workers/FS MessagePorts, deterministic suspended spawn gates in all
+three modes, bounded snapshots, identity mismatch detection and error release.
+
 This document explains how Vivari works end to end: the core constraint it
 solves, the worker topology, the syscall protocol, the filesystem, the process
 model, the Node runtime, networking, native code, and the build. It is the

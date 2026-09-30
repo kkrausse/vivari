@@ -82,3 +82,36 @@ retained emitted output remains the first `e14ea7d` checkpoint, not the follow-u
 source. Rebuild and regenerate the consumer receipt together before qualification
 of the follow-up. Source-mode `KernelBridge` now uses supported Vite worker asset
 imports rather than appending a second `?` to Vite's existing worker query.
+
+## Spawn routing diagnostic checkpoint (not a causal repair)
+
+The first isolated browser cohort at `33e74eb` retained a guest parked in
+`execSync`/opcode 20, one process worker, no child worker and responsive kernel
+diagnostics. Its kernel debugger pause produced no frame within the bounded
+deadline, so kernel SAB/dispatch state remained unknown. Headless tests, including
+the matching shell `execSync` path, pass; they do not explain that browser failure.
+
+This source checkpoint adds read-only, bounded routing instrumentation exposed by
+the existing host `vv-diag` round-trip. Read `diag.syscallTrace` (version
+`single-kernel-routing-diagnostic-1`, latest 64 sequenced events),
+`diag.procs[].syscallControl`, and `diag.syscallRouting` (live client/kernel control
+samples, `sameSab`, next PID, lazy command registry and in-flight loader count).
+No payloads/env/argv/stacks are logged. The ring distinguishes filesystem-port
+receipt from process-worker syscall messages and records spawn loading/creation
+boundaries and errors. It does not mutate or complete requests to collect evidence.
+
+Parent/integration owner must coordinate a new committed-source build, receipt and
+fresh origin, then run only the minimal async/spawnSync/execSync probes. On the
+first failure preserve normal host diagnostics; no debugger frame is required.
+The old browser cohort, server, ownership lock and frozen emitted artifacts remain
+untouched. No full acceptance rerun is justified until the causal failure is fixed.
+No `packages/core/dist` rebuild is performed by this diagnostic change.
+
+Verification: `node scripts/test-single-kernel-routing.mjs`,
+`node scripts/test-single-kernel.mjs`, `node scripts/verify-node.mjs`, and
+`bunx tsc -p packages/core/tsconfig.build.json --noEmit`: PASS. The routing test
+holds real guests at deterministic load gates, samples both actual registrations,
+compares the entire SAB before/after diagnostics, releases and joins actual child
+workers in all three modes, and verifies an injected dispatch fault releases a
+real parked caller through the unchanged errno path. These are instrumentation
+contracts, not evidence that the natural Chrome hang has been repaired.

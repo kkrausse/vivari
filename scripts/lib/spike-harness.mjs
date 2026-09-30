@@ -106,6 +106,7 @@ export async function bootSpikeKernel({ npm = false } = {}) {
   };
   const listening = new Set();
   const kernel = new Kernel({ fs: kernelFs.fs, spawnWorker, fetcher, stdout: cap, stderr: cap });
+  filesystem.server.syscallTrace = kernel.syscallTrace;
   kernel.onListen = (port) => listening.add(port);
   kernel.installCoreutils();
   let fetchN = 0;

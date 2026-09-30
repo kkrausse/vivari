@@ -1,5 +1,19 @@
 # Vivari — Roadmap
 
+## Single-kernel spawn routing diagnostic checkpoint — 2026-09-30
+
+The first real-browser cohort retains a parked synchronous spawn with no child;
+headless spawn checks pass and a bounded kernel debugger attempt yielded no frame.
+Do not attribute that failure from a syscall count alone. Add a 64-event scalar
+routing ring and live filesystem/kernel SAB control/identity samples to ordinary
+host diagnostics, covering worker/FS doorbells and spawn gate/create boundaries.
+The checkpoint is diagnostic only, not a causal repair or browser acceptance.
+Its regression runs real guest async/spawnSync/execSync with deterministic loading
+gates, actual filesystem MessagePorts, full-SAB nonmutation checks and fault release.
+Focused routing/single-kernel checks, verify-node and core declaration typecheck
+pass. Parent owns a fresh build/minimal browser reproduction; old artifacts and
+failed browser cohort remain untouched.
+
 ## Clean kernel-fs completion candidate — 2026-09-29
 
 Starting from pinned e998de62, carry only the completion predicate and the

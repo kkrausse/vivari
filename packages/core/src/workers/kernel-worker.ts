@@ -19,6 +19,7 @@
 
 import { newProgress, onFetch, onOutput, idleClear, stallVerdict, shouldReportStallFor, stallReportChunk } from "../../terminal-feedback.js";
 import { Kernel } from "../../../kernel-host/kernel.js";
+import { sampleSyscallClients } from "../../../kernel-host/syscall-trace.js";
 import { createKernelFilesystem } from "./kernel-filesystem.ts";
 import { doFetch } from "./kernel-fetch.ts";
 import { initTransferList } from "../../../kernel-host/worker-transfer.js";
@@ -1495,6 +1496,7 @@ async function boot() {
         return;
       }
       sawMessage = true;
+      if (event.data.type === "syscall") kernel.syscallTrace.record(info.pid, "worker-message-syscall", kernel.procs.get(info.pid)?.ctrl);
       const handler = info.on[event.data.type];
       if (!handler) return;
       // These payloads are only as trustworthy as the process that sent them, which
@@ -1511,7 +1513,10 @@ async function boot() {
       try {
         handler(event.data);
       } catch (err) {
+        kernel.syscallTrace.record(info.pid, "worker-message-error", kernel.procs.get(info.pid)?.ctrl, { errorName: err?.name });
         console.error(`[kernel] message '${event.data.type}' from pid ${info.pid} failed:`, err);
+      } finally {
+        if (event.data.type === "syscall") kernel.syscallTrace.record(info.pid, "worker-message-syscall-return", kernel.procs.get(info.pid)?.ctrl);
       }
     };
     // A worker that fails to BOOT never sends 'exit', so without these handlers the
@@ -1576,6 +1581,7 @@ async function boot() {
     // structuredClone rejects the whole init message. initTransferList is shared with
     // every other host that builds this message, so they cannot disagree about it.
     worker.postMessage(init, initTransferList(info, port1));
+    kernel.syscallTrace.record(info.pid, "worker-init-posted", kernel.procs.get(info.pid)?.ctrl);
     return {
       terminate: () => {
         worker.terminate();
@@ -1617,6 +1623,7 @@ async function boot() {
       } else post("stderr", { chunk });
     },
   });
+  filesystem.server.syscallTrace = kernel.syscallTrace;
   // Liveness watchdog: a process has gone quiet for a long time. This is the only
   // thing the user can see when the VM stops making progress — previously a wedged
   // install left the terminal on its last line with no indication whether it was
@@ -2596,6 +2603,12 @@ self.onmessage = async (event) => {
   if (m.type === "vv-diag") {
     if (!kernel) { post("vv-reply", { reqId: m.reqId, ok: false, error: "kernel not ready" }); return; }
     const diag = kernel.diagnostics();
+    diag.syscallRouting = {
+      clients: sampleSyscallClients(kernel, filesystemRef.server),
+      nextPid: kernel.nextPid,
+      lazyCommands: [...kernel.lazyLoaders.keys()].slice(0, 32),
+      lazyInflight: kernel.lazyInflight.size,
+    };
     Promise.all([queryVfsMem(), queryAllProcMem()])
       .then(([vfs, procMem]) => {
         const byPid = new Map((procMem || []).map((r) => [r.pid, r]));

@@ -143,13 +143,18 @@ export class FsServer {
   register(clientId, sab, port = null) {
     const { ctrl, data } = makeViews(sab);
     this.clients.set(clientId, { ctrl, data, port });
+    this.syscallTrace?.record(clientId, "fs-register", ctrl);
     if (port) {
-      port.onmessage = () => this.service(clientId);
+      port.onmessage = () => {
+        this.syscallTrace?.record(clientId, "fs-doorbell", ctrl);
+        this.service(clientId);
+      };
       if (port.start) port.start();
     }
   }
 
   unregister(clientId) {
+    this.syscallTrace?.record(clientId, "fs-unregister", this.clients.get(clientId)?.ctrl);
     this.sqlite?.release(clientId);
     this.clients.delete(clientId);
     // Drop any watches this client still held (its process is gone).
@@ -226,15 +231,18 @@ export class FsServer {
     if (!c) return;
     const { ctrl, data } = c;
     const opcode = Atomics.load(ctrl, I_OPCODE);
+    this.syscallTrace?.record(clientId, "fs-dispatch-before", ctrl, { dispatchedOpcode: opcode });
     const { flags, fields } = decodeRequest(data.slice(0, Atomics.load(ctrl, I_REQ_LEN)));
     try {
       if (opcode === OP_SQLITE) {
         if (!this.sqlite) throw new Error("SQLite backend unavailable");
         this.sqlite.request(clientId, decodeBytes(fields[0])).then(() => {
+          this.syscallTrace?.record(clientId, "fs-sqlite-response-ok", ctrl);
           Atomics.store(ctrl, I_RES_LEN, 0);
           Atomics.store(ctrl, I_STATE, STATE_RESPONSE_OK);
           Atomics.notify(ctrl, I_STATE);
         }, err => {
+          this.syscallTrace?.record(clientId, "fs-sqlite-response-error", ctrl, { errorName: err?.name });
           const bytes = encodeString(String(err.message || err)).subarray(0, data.length);
           data.set(bytes);
           Atomics.store(ctrl, I_RES_LEN, bytes.length);
@@ -245,6 +253,7 @@ export class FsServer {
       }
       const bytes = this.dispatch(opcode, flags, fields, clientId);
       if (bytes.length > data.length) {
+        this.syscallTrace?.record(clientId, "fs-response-oversized", ctrl);
         // The response doesn't fit the shared window (e.g. a whole-file read of a
         // >1 MiB file). Signal EFBIG so the client retries via the chunked fd path
         // instead of throwing an opaque "offset is out of bounds" from data.set().
@@ -266,11 +275,14 @@ export class FsServer {
       Atomics.store(ctrl, I_STATE, STATE_RESPONSE_OK);
       Atomics.notify(ctrl, I_STATE);
     } catch (err) {
+      this.syscallTrace?.record(clientId, "fs-dispatch-error", ctrl, { errorName: err?.name });
       const bytes = encodeString(typeof err === "string" ? err : String(err?.message || "EIO"));
       data.set(bytes, 0);
       Atomics.store(ctrl, I_RES_LEN, bytes.length);
       Atomics.store(ctrl, I_STATE, STATE_RESPONSE_ERR);
       Atomics.notify(ctrl, I_STATE);
+    } finally {
+      this.syscallTrace?.record(clientId, "fs-dispatch-after", ctrl, { dispatchedOpcode: opcode });
     }
   }
 
