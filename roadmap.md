@@ -1,5 +1,23 @@
 # Vivari — Roadmap
 
+## Post-close target retention remains bounded unknown — 2026-09-30
+
+Read-only review of the retained e35eab4 toolkit case-1 failure finds successful
+reader cancellation, natural fixture exit, empty process/listener/HTTP/fetch
+registries at runtime stop, and a completed browserCase (which joins workspace
+flush/close). Chrome still lists the kernel target for the whole 15-second census.
+The retained capture has neither a post-close ownership-lock sample nor execution
+evidence from the listed target, so it cannot classify live resource retention
+versus target-lifecycle lag. No causal runtime repair or deadline change is justified.
+
+`test:single-kernel-close` now characterizes the actual SDK host/endpoint/stream
+boundary with real Node threads/ports and an explicitly substituted worker protocol
+fixture. It checks cancellation, stream release, pending RPC rejection, exactly-once
+terminate and actual thread exit; a loader-only removal of Host's terminate call
+fails the gate. This is not a reproduction of Chrome/OPFS retention. Fresh owned
+browser followup must sample lock ownership alongside target census and record the
+actual terminate invocation before attributing the retained failure.
+
 ## Immediate synchronous spill rollback and ownership receipts — 2026-09-30
 
 Review of frozen `f545699` found second-file staging failure left an unreachable

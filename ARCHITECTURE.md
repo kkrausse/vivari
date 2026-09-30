@@ -107,7 +107,18 @@ publishing its errno. A successful FsServer unlink reports an idempotent receipt
 through the direct-kernel-fs adapter, deleting the exact path's ownership index
 and its parent's ownership record. This is not a guest-supplied PID/ack and does
 not remove another invocation's unread spill. Host diagnostics expose
-`spawnCapture.ownedSpills` and `procs[].ownedSpawnSpills` for cleanup checks.
+  `spawnCapture.ownedSpills` and `procs[].ownedSpawnSpills` for cleanup checks.
+
+Post-close characterization: `test:single-kernel-close` imports the shipped host,
+endpoint and HTTP response stream, uses real transferred Node MessagePorts, and
+checks abort-before-headers, reader cancellation after binary data, and normal EOF.
+Each path must release its fixture stream, reject outstanding host RPCs, request
+termination exactly once and observe actual thread exit. The worker is a minimal
+protocol fixture, not Kernel/OPFS; this does not qualify Chrome target destruction
+or ownership-lock release. Retained toolkit browser evidence at e35eab4 has a
+successful case-1 close but a kernel target surviving the 15-second census; live
+worker retention versus target-observation lag remains unclassified. Do not relax
+that deadline or treat the headless characterization as browser acceptance.
 
 This document explains how Vivari works end to end: the core constraint it
 solves, the worker topology, the syscall protocol, the filesystem, the process
