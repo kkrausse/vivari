@@ -16,17 +16,19 @@ const deferred = () => { let resolve; const promise = new Promise(yes => { resol
 const turn = () => new Promise(resolve => setImmediate(resolve));
 globalThis.location = new URL('http://fixture.invalid/');
 try {
-  for (const mode of ['abort-held', 'unlisten-held', 'cancel-reject', 'response-cancel', 'normal-eof', 'upload-read-reject', 'response-overflow']) {
+  for (const mode of ['abort-held', 'reentrant-pull-abort', 'unlisten-held', 'cancel-reject', 'response-cancel', 'normal-eof', 'upload-read-reject', 'response-overflow']) {
     const gate = deferred(), started = deferred(), reading = deferred();
+    const lifetime = new AbortController();
     let cancels = 0, sourceClosed = false, notify;
     const body = new ReadableStream({
       pull(controller) {
         reading.resolve();
+        if (mode === 'reentrant-pull-abort') lifetime.abort(Error('source pull aborted'));
         if (mode === 'upload-read-reject') controller.error(Error('source read rejected'));
         if (mode === 'normal-eof') controller.close();
       },
       async cancel() { cancels++; started.resolve(); await gate.promise; if (mode === 'cancel-reject') throw Error('source cancel rejected'); sourceClosed = true; },
-    });
+    }, {highWaterMark:0});
     const peers = [];
     const host = { listeners: new Map([[5173, 'fixture']]), on(fn) { notify = fn; return () => {}; }, post(type, _, ports) {
       assert.equal(type, 'workspace-http-stream');
@@ -38,7 +40,6 @@ try {
       peer.start(); peer.postMessage({op:'upload-credit'});
       if (mode === 'response-cancel' || mode === 'response-overflow') peer.postMessage({op:'headers',status:200,headers:[]});
     } };
-    const lifetime = new AbortController();
     const endpoint = createEndpoint(host, 5173, 'fixture', lifetime.signal);
     let joined = false;
     const receipt = endpoint.settled.then(() => { joined = true; });

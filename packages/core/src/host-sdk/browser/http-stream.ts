@@ -57,6 +57,7 @@ export function fetchHttpStream(channel: MessagePort, request: Request, onClose:
       cancel(reason) { fail(reason ?? new Error("HTTP response cancelled")); return settled; },
     }, { highWaterMark: 0 });
     const writeUpload = async () => {
+      if (closed) return;
       if (uploading) throw new Error("Duplicate HTTP upload credit");
       uploading = true;
       try {
@@ -84,7 +85,8 @@ export function fetchHttpStream(channel: MessagePort, request: Request, onClose:
           // Drain EOF for bodyless responses even though Fetch exposes no stream.
            if (noBody) void body.cancel().catch(() => {}); // failure remains in settled
         } else if (message.op === "upload-credit") {
-          const task = writeUpload();
+          // Register before invoking user-source read: pull may abort reentrantly.
+          const task = Promise.resolve().then(writeUpload);
           tasks.add(task);
           void task.then(() => tasks.delete(task), error => {
             // Keep a rejected task until cleanup snapshots it, including late reads.
