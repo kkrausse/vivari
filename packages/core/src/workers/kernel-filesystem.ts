@@ -16,7 +16,7 @@ import { installTree, installTreeImage } from "../../../kernel-host/install-tree
 import { createDirectKernelFs } from "../../../kernel-host/direct-kernel-fs.js";
 import { initializeKernelBackends } from "../../../kernel-host/kernel-backends.js";
 
-export async function createKernelFilesystem({ emit, compression = true }) {
+export async function createKernelFilesystem({ emit, compression = true, lockTimeoutMs = undefined }) {
 const post = (type, extra) => emit({ type, ...extra });
 
 let server = null;
@@ -259,7 +259,7 @@ async function createOpfsDepStorage() {
   accessRef = buildAccess(vfs);
   try {
     if (typeof navigator !== "undefined" && navigator.storage && navigator.storage.getDirectory) {
-      persistence = await createOpfsPersistence({ access: accessRef, shouldPersist });
+      persistence = await createOpfsPersistence({ access: accessRef, shouldPersist, lockTimeoutMs });
       // Restoring a saved project (esp. its node_modules) can take a while — the
       // VFS is re-hydrated entry-by-entry. Report progress so the user knows the
       // "stall" is real work, not a hang. Only chatter when there's a lot to do.

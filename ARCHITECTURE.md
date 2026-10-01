@@ -172,7 +172,9 @@ worker fault or a prior `destroy()` still terminate and reject. Repeat/concurren
 calls share one promise. `destroy()` remains the unproven hard kill.
 
 Reopen waits for the `vivari-vfs-owner` Web Lock with an `AbortSignal` bound
-(`lockTimeoutMs`, default 10 s) instead of `ifAvailable`. A timeout is a
+(`lockTimeoutMs`, default 10 s) instead of `ifAvailable`. The host sets it with
+`Host.open(distribution, signal, diagnostics, { lockTimeoutMs })` (validated as a
+finite number >= 0, carried on the `init` message; omitted keeps the default). A timeout is a
 `STORAGE_BUSY` error that fails kernel boot (`Host.open` rejects with that code);
 it is no longer downgraded to an ephemeral workspace. Consequence: a second tab
 on the same origin now fails to boot after the bound instead of running without

@@ -133,6 +133,26 @@ try {
     await host.worker.exited;
     console.log(`PASS ${deliberate ? "deliberate close" : "worker fault"}: execution cleanup classification`);
   }
+  {
+    // The caller-supplied owner-lock bound reaches the kernel's init message; invalid values never start a worker.
+    const created = workers.length;
+    for (const lockTimeoutMs of [-1, Infinity, NaN, "250"]) {
+      await assert.rejects(Host.open({ assetBaseUrl: "/runtime/", version: "fixture" }, undefined, undefined, { lockTimeoutMs }), RangeError);
+    }
+    assert.equal(workers.length, created);
+    for (const [options, expected] of [[{ lockTimeoutMs: 250 }, { type: "init", compress: true, lockTimeoutMs: 250 }], [undefined, { type: "init", compress: true }]]) {
+      let init;
+      const inits = workers.length;
+      const opening = Host.open({ assetBaseUrl: "/runtime/", version: "fixture" }, undefined, undefined, options);
+      while (workers.length === inits) await new Promise(setImmediate);
+      workers.at(-1).thread.on("message", m => { if (m.type === "ready") init = m.init; });
+      const host = await opening;
+      assert.deepEqual(init, expected);
+      host.destroy();
+      await host.worker.exited;
+    }
+    console.log("PASS Host.open lockTimeoutMs: validated, carried on init, omitted by default");
+  }
   for (const mode of ["clean", "errors", "silent", "destroyed"]) {
     // Host.close: terminate only after the shutdown acknowledgement; never resolve an unproven close.
     const host = await Host.open({ assetBaseUrl: "/runtime/", version: "fixture" });

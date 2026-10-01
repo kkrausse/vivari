@@ -3,7 +3,7 @@ const channels = new Set();
 let cancellations = 0;
 let shutdownMode = "clean";
 parentPort.on("message", message => {
-  if (message.type === "init") parentPort.postMessage({ type: "ready" });
+  if (message.type === "init") parentPort.postMessage({ type: "ready", init: message });
   else if (message.type === "workspace-http-stream") {
     const channel = message.channel;
     channels.add(channel);

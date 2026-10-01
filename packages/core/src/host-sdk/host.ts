@@ -1,6 +1,6 @@
 import { WorkspaceError, type Distribution } from "./types.js";
 import type { diagnosticReporter } from "./diagnostics.js";
-import type { PersistenceState, InstallTreeEntry, InstallTreeImageEntry, TreeInstallResult, HostCloseOptions } from "./types.js";
+import type { PersistenceState, InstallTreeEntry, InstallTreeImageEntry, TreeInstallResult, HostCloseOptions, HostOpenOptions } from "./types.js";
 
 // Private transport boundary. Worker protocol never escapes to consumers.
 export type Message = { type: string; [key: string]: unknown };
@@ -37,8 +37,12 @@ export class Host {
     this.worker.onerror = (event) => this.destroy(new Error(event.message));
     this.worker.onmessageerror = () => this.destroy(new Error("Workspace worker message could not be decoded"));
   }
-  static async open(distribution: Distribution, signal?: AbortSignal, diagnostics?: ReturnType<typeof diagnosticReporter>): Promise<Host> {
+  static async open(distribution: Distribution, signal?: AbortSignal, diagnostics?: ReturnType<typeof diagnosticReporter>, options: HostOpenOptions = {}): Promise<Host> {
     signal?.throwIfAborted();
+    const { lockTimeoutMs } = options;
+    if (lockTimeoutMs !== undefined && !(typeof lockTimeoutMs === "number" && Number.isFinite(lockTimeoutMs) && lockTimeoutMs >= 0)) {
+      throw new RangeError("lockTimeoutMs must be a finite number >= 0");
+    }
     if (!globalThis.crossOriginIsolated) throw new WorkspaceError("BACKEND_UNAVAILABLE", "Workspace requires COOP same-origin and COEP require-corp");
     const base = new URL(distribution.assetBaseUrl.replace(/\/?$/, "/"), location.href);
     diagnostics?.emit("manifest.fetch", { version: distribution.version });
@@ -73,7 +77,7 @@ export class Host {
         signal?.addEventListener("abort", abort, { once: true });
         if (signal?.aborted) { abort(); return; }
         diagnostics?.emit("worker.init.sent");
-        host.post("init", { compress: true });
+        host.post("init", { compress: true, ...(lockTimeoutMs === undefined ? {} : { lockTimeoutMs }) });
       });
       diagnostics?.emit("worker.ready");
       return host;

@@ -26,6 +26,11 @@ export interface NodeLaunchOptions {
   env?: Record<string, string>;
   signal?: AbortSignal;
 }
+export interface HostOpenOptions {
+  /** Bound on waiting for the storage owner lock a previous kernel may still
+   * hold. Finite and >= 0; default 10000. Timing out fails open with STORAGE_BUSY. */
+  lockTimeoutMs?: number;
+}
 export interface HostCloseOptions {
   /** Bound on the kernel's shutdown acknowledgement. Default 30000. */
   timeoutMs?: number;

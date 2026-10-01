@@ -1330,6 +1330,9 @@ let shuttingDown = null;
 // System Worker. On by default; a consumer sets it false only to trade memory
 // for a little less CPU.
 let vfsCompression = true;
+// Bound on the storage owner-lock wait, from init.lockTimeoutMs (Host.open's
+// HostOpenOptions). Undefined keeps the persistence module's default.
+let ownerLockTimeoutMs = undefined;
 
 // A bound port isn't the same as a *serving* one: Vite 8 (rolldown) binds :port
 // a few times during startup (bind → close → rebind), so the first `listen`
@@ -1455,6 +1458,7 @@ async function boot() {
   post("log", { line: "  [boot] initializing kernel-owned filesystem…", dim: true });
   const filesystem = await createKernelFilesystem({
     compression: vfsCompression,
+    lockTimeoutMs: ownerLockTimeoutMs,
     emit: (m) => post(m.type, m),
   });
   filesystemRef = filesystem;
@@ -2473,6 +2477,7 @@ self.onmessage = async (event) => {
   if (m.type === "init") {
     // Default on: only an explicit `compress: false` (BootOptions.compress) disables it.
     vfsCompression = m.compress !== false;
+    ownerLockTimeoutMs = typeof m.lockTimeoutMs === "number" && Number.isFinite(m.lockTimeoutMs) && m.lockTimeoutMs >= 0 ? m.lockTimeoutMs : undefined;
     // `error` (not just `log`) so the SDK's boot() has something to reject on —
     // otherwise a kernel that dies here never posts `ready` and the caller waits
     // out its whole timeout with no idea why.
