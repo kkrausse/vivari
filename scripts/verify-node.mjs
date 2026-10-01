@@ -90,8 +90,9 @@ async function makeKernel() {
     return {
       terminate: () => {
         worker.terminate();
-        filesystem.server.unregister(info.pid);
+        const released = filesystem.server.unregister(info.pid);
         port2.close();
+        return released;
       },
       postMessage: (m) => worker.postMessage(m),
     };

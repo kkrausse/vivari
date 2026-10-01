@@ -34,6 +34,7 @@
     "test:single-kernel": "node scripts/test-single-kernel.mjs",
     "test:single-kernel-review": "node scripts/test-single-kernel-review.mjs",
     "test:single-kernel-close": "node scripts/test-single-kernel-close.mjs",
+    "test:single-kernel-lifecycle": "node scripts/test-single-kernel-lifecycle.mjs",
     "test:single-kernel-routing": "node scripts/test-single-kernel-routing.mjs",
     "test:sync-capture": "node scripts/test-sync-capture.mjs",
     "smoke": "node scripts/smoke-sdk.mjs",

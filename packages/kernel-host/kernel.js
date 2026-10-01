@@ -976,7 +976,10 @@ export class Kernel {
       }
     }
     try {
-      proc.handle && proc.handle.terminate();
+      // A handle may return its filesystem release receipt (in-flight SQLite
+      // persistence for this PID); the exit receipt joins it.
+      const released = proc.handle && proc.handle.terminate();
+      if (released?.then) joins.push(released);
     } catch {
       /* ignore */
     }
@@ -1086,8 +1089,8 @@ export class Kernel {
       if (this.onProcExit) this.onProcExit(pid, result);
     };
     // Native PID death closes admission above. The public receipt additionally joins
-    // OP_FETCH continuations (including body writes and publication), not a counter
-    // sample or Abort dispatch. Yield so backend/guest callbacks can make progress.
+    // OP_FETCH continuations (including body writes and publication) and the PID's
+    // in-flight SQLite persistence, not a counter sample or Abort dispatch. Yield so backend/guest callbacks can make progress.
     if (joins.length) {
       const cleanup = Promise.allSettled(joins).then(outcomes => {
         const failed = outcomes.find(outcome => outcome.status === "rejected");

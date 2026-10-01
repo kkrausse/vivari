@@ -1586,8 +1586,9 @@ async function boot() {
       terminate: () => {
         worker.terminate();
         procWorkers.delete(info.pid);
-        filesystem.server.unregister(info.pid);
+        const released = filesystem.server.unregister(info.pid);
         port2.close();
+        return released;
       },
       postMessage: (m) => worker.postMessage(m),
     };

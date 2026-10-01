@@ -155,7 +155,9 @@ export class FsServer {
 
   unregister(clientId) {
     this.syscallTrace?.record(clientId, "fs-unregister", this.clients.get(clientId)?.ctrl);
-    this.sqlite?.release(clientId);
+    // In-flight SQLite work is joined, not abandoned: a promise is returned only
+    // when a request is still suspended, and settles after its databases close.
+    const released = this.sqlite?.release(clientId);
     this.clients.delete(clientId);
     // Drop any watches this client still held (its process is gone).
     if (this.watches.size) {
@@ -163,6 +165,7 @@ export class FsServer {
         if (w.clientId === clientId) this._deleteWatch(key, w);
       }
     }
+    return released;
   }
 
   addWatch(clientId, watchId, path, recursive) {
@@ -236,12 +239,17 @@ export class FsServer {
     try {
       if (opcode === OP_SQLITE) {
         if (!this.sqlite) throw new Error("SQLite backend unavailable");
+        // The client may unregister while its request is suspended: its SAB then
+        // belongs to a terminated worker and must not be answered.
+        const gone = () => this.clients.get(clientId) !== c;
         this.sqlite.request(clientId, decodeBytes(fields[0])).then(() => {
+          if (gone()) return;
           this.syscallTrace?.record(clientId, "fs-sqlite-response-ok", ctrl);
           Atomics.store(ctrl, I_RES_LEN, 0);
           Atomics.store(ctrl, I_STATE, STATE_RESPONSE_OK);
           Atomics.notify(ctrl, I_STATE);
         }, err => {
+          if (gone()) return;
           this.syscallTrace?.record(clientId, "fs-sqlite-response-error", ctrl, { errorName: err?.name });
           const bytes = encodeString(String(err.message || err)).subarray(0, data.length);
           data.set(bytes);

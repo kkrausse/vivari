@@ -86,8 +86,9 @@ export async function bootSpikeKernel({ npm = false } = {}) {
     return {
       terminate: () => {
         w.terminate();
-        filesystem.server.unregister(info.pid);
+        const released = filesystem.server.unregister(info.pid);
         port2.close();
+        return released;
       },
       postMessage: (m) => w.postMessage(m),
     };

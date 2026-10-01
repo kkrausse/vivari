@@ -138,6 +138,19 @@ rethrows the first handler/cleanup error. Its `host-error` broadcast carries
 execution then settles as SIGTERM without `cleanupError`, so `stop()` does not
 throw `CLEANUP_FAILED`. Worker faults and other reasons still stamp it.
 
+SQLite release is joined, not abandoned. The SQLite server tracks in-flight
+requests per client; `release(client)` (from `FsServer.unregister`) closes
+synchronously when nothing is in flight, otherwise marks the client closing
+(new requests are rejected), waits for the suspended requests and only then
+closes its databases. It returns that receipt, which `unregister` and the process
+handle's `terminate()` pass to `Kernel.finalize`, so the PID's exit receipt and
+SDK `stop()` settle after the OPFS write and carry its failure as `cleanupError`.
+A resumed request re-checks its connection, runs no further statements for an
+exited owner, writes no `.out` file and FsServer does not answer the dead SAB.
+A custom `spawnWorker` must return `unregister`'s result from `terminate()`.
+`test:single-kernel-lifecycle` drives this with the real Kernel/FsServer/SQLite/
+Rust VFS and a gated persistence fixture (not OPFS).
+
 This document explains how Vivari works end to end: the core constraint it
 solves, the worker topology, the syscall protocol, the filesystem, the process
 model, the Node runtime, networking, native code, and the build. It is the

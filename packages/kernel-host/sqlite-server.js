@@ -8,6 +8,10 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
   const connections = new Map();
   const owners = new Map();
   const failedPaths = new Set();
+  // client -> Set of unsettled request promises; client -> { receipt, error }
+  // while release() waits for them. A closing client admits no new request.
+  const inflight = new Map();
+  const closing = new Map();
   let sequence = 0;
   const enc = new TextEncoder();
   const dec = new TextDecoder();
@@ -21,7 +25,7 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
 
   async function persist(c) {
     if (c.ioError) throw c.ioError;
-    if (!c.path || !capi.sqlite3_get_autocommit(c.db.pointer)) return;
+    if (!c.path || !c.db.pointer || !capi.sqlite3_get_autocommit(c.db.pointer)) return;
     try {
       const bytes = capi.sqlite3_js_db_export(c.db.pointer);
       vfs.write_file(c.path, bytes);
@@ -29,6 +33,9 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
       await persistence.flush();
     } catch (error) {
       c.poisoned = true; c.ioError = error; failedPaths.add(c.path);
+      // The exited owner cannot be told: surface it on its release receipt.
+      const state = closing.get(c.client);
+      if (state) state.error ??= error;
       throw error;
     }
   }
@@ -39,11 +46,41 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
     connections.delete(id);
     if (c.path) owners.delete(c.path);
   }
+  // Closing a database under a request suspended in persist() would resume it on
+  // a freed pointer. Wait for the client's in-flight requests, then close. Returns
+  // undefined when nothing was in flight (closed synchronously), else a receipt
+  // that settles after the close and rejects with a persistence failure it joined.
   function release(client) {
-    for (const [id, c] of connections) if (c.client === client) close(id);
+    const state = closing.get(client);
+    if (state) return state.receipt;
+    const closeAll = () => { for (const [id, c] of connections) if (c.client === client) close(id); };
+    const pending = inflight.get(client);
+    if (!pending?.size) { closeAll(); return; }
+    const closed = { error: null };
+    closed.receipt = Promise.allSettled([...pending]).then(() => {
+      try { closeAll(); } finally { closing.delete(client); }
+      if (closed.error) throw closed.error;
+    });
+    closing.set(client, closed);
+    return closed.receipt;
+  }
+  // After any await the owner may have exited: never touch a closed connection
+  // or continue a dead process's remaining statements.
+  function live(id, c) {
+    if (connections.get(id) !== c || closing.has(c.client)) fail("SQLITE_MISUSE: connection closed during request");
+  }
+  function request(client, input) {
+    if (closing.has(client)) return Promise.reject(new Error("SQLITE_MISUSE: process is closing"));
+    const task = run(client, input);
+    let pending = inflight.get(client);
+    if (!pending) inflight.set(client, pending = new Set());
+    pending.add(task);
+    const settle = () => { pending.delete(task); if (!pending.size && inflight.get(client) === pending) inflight.delete(client); };
+    task.then(settle, settle);
+    return task;
   }
 
-  async function request(client, input) {
+  async function run(client, input) {
     const req = JSON.parse(dec.decode(vfs.read_file(input)));
     const output = input + ".out";
     let result;
@@ -83,6 +120,7 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
           connections.set(id, c);
           if (path) owners.set(path, id);
           await persist(c);
+          live(id, c);
           result = { id };
         } catch (error) { close(id); if (db.pointer) db.close(); throw error; }
       } else {
@@ -138,20 +176,23 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
                     capi.sqlite3_finalize(statement);
                     c.db.exec({ sql, rowMode: "stmt", callback: collect });
                     await persist(c);
+                    live(req.id, c);
                   }
                 } finally { wasm.dealloc(pointers); wasm.dealloc(text); }
               }
             } finally {
               try { await persist(c); } catch (error) { c.poisoned = true; throw error; }
             }
+            live(req.id, c);
             result = { columns, rows, changes: String(capi.sqlite3_changes64(c.db.pointer)),
               lastInsertRowid: String(capi.sqlite3_last_insert_rowid(c.db.pointer)) };
           } else fail("SQLITE_MISUSE: unsupported method");
         }
       }
-      vfs.write_file(output, enc.encode(JSON.stringify({ result })));
+      // A released client has no reader left for the response file.
+      if (!closing.has(client)) vfs.write_file(output, enc.encode(JSON.stringify({ result })));
     } catch (error) {
-      vfs.write_file(output, enc.encode(JSON.stringify({ error: String(error.message || error) })));
+      if (!closing.has(client)) vfs.write_file(output, enc.encode(JSON.stringify({ error: String(error.message || error) })));
     }
   }
   return { request, release };
