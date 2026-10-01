@@ -17,7 +17,9 @@ parentPort.on("message", message => {
       }
     });
     if (message.request.path !== "/never") channel.postMessage({ op: "headers", status: 200, headers: [] });
-  } else if (message.type === "workspace-flush") parentPort.postMessage({ type: "vv-reply", reqId: message.reqId, ok: true });
+  } else if (message.type === "vv-stat") parentPort.postMessage({ type: "vv-reply", reqId: message.reqId, ok: true, exists: true, isDir: false });
+  else if (message.type === "proc-spawn") parentPort.postMessage({ type: "proc-started", execId: message.execId });
+  else if (message.type === "workspace-flush") parentPort.postMessage({ type: "vv-reply", reqId: message.reqId, ok: true });
   else if (message.type === "fixture-state") {
     // A parentPort message and a transferred-port message have no total order.
     // Wait for the fixture's actual close predicate, not a delay as an oracle.

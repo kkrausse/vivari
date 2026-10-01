@@ -18,6 +18,7 @@ const hooks = registerHooks({
 });
 const { Host } = await import("../packages/core/src/host-sdk/host.ts");
 const { createEndpoint } = await import("../packages/core/src/host-sdk/browser/endpoint.ts");
+const { launch } = await import("../packages/core/src/host-sdk/execution.ts");
 const originals = new Map();
 function replace(name, value) {
   originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
@@ -94,9 +95,47 @@ try {
     assert.equal(observer.record(host.worker).terminateCalls, 1, "browser observer forwards one native termination");
     console.log(`PASS ${mode}: stream release, pending rejection, exactly-once termination and real thread exit`);
   }
-  assert.equal(observer.entries.filter(event => event.kind === "kernel-created").length, 3);
-  assert.equal(observer.entries.filter(event => event.kind === "terminate-called").length, 3);
-  assert.equal(observer.entries.filter(event => event.kind === "terminate-returned").length, 3);
+  {
+    // A throwing handler used to skip terminate() and leave later destroy() calls as no-ops.
+    const host = await Host.open({ assetBaseUrl: "/runtime/", version: "fixture" });
+    const boom = new Error("handler boom");
+    let later = 0, cleaned = 0;
+    host.on(() => { throw boom; });
+    host.on(m => { if (m.type === "host-error") later++; });
+    host.cleanup.push(() => { throw new Error("cleanup boom"); }, () => { cleaned++; });
+    const rejected = assert.rejects(host.request("fixture-pending"), error => error.code === "CLOSED");
+    assert.throws(() => host.destroy(), error => error === boom, "first handler error reaches the caller");
+    assert.equal(host.worker.terminations, 1, "throwing handler still terminates");
+    assert.equal(later, 1, "later handlers still run");
+    assert.equal(cleaned, 1, "later cleanup still runs");
+    await rejected;
+    await host.worker.exited;
+    assert.equal(host.pending.size, 0);
+    assert.equal(host.handlers.size, 0);
+    host.destroy();
+    assert.equal(host.worker.terminations, 1);
+    console.log("PASS throwing destroy handler: unconditional termination, cleanup and first error preserved");
+  }
+  for (const deliberate of [true, false]) {
+    // A deliberate close used to stamp cleanupError, so stop() threw CLEANUP_FAILED.
+    const host = await Host.open({ assetBaseUrl: "/runtime/", version: "fixture" });
+    const execution = await launch(host, { entry: "/fixture.js" });
+    if (deliberate) host.destroy(); else host.destroy(new Error("worker fault"));
+    const exit = await execution.exited;
+    assert.equal(exit.signal, "SIGTERM");
+    if (deliberate) {
+      assert.equal("cleanupError" in exit, false, "deliberate close is not a cleanup failure");
+      await execution.stop();
+    } else {
+      assert.equal(exit.cleanupError, "worker fault");
+      await assert.rejects(execution.stop(), error => error.code === "CLEANUP_FAILED");
+    }
+    await host.worker.exited;
+    console.log(`PASS ${deliberate ? "deliberate close" : "worker fault"}: execution cleanup classification`);
+  }
+  assert.equal(observer.entries.filter(event => event.kind === "kernel-created").length, workers.length);
+  assert.equal(observer.entries.filter(event => event.kind === "terminate-called").length, workers.length);
+  assert.equal(observer.entries.filter(event => event.kind === "terminate-returned").length, workers.length);
   assert.equal(observer.dropped, 0);
 } finally {
   clearTimeout(deadline);

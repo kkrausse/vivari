@@ -72,7 +72,8 @@ export async function launch(host: Host, options: NodeLaunchOptions, binding: Re
       const error = new Error(String(m.error));
       done = true; off(); stdout.end(error); stderr.end(error); rejectStart(error);
       options.signal?.removeEventListener("abort", abort);
-      resolveExit({ exitCode: 143, signal: "SIGTERM", forced: true, cleanupError: String(m.error) });
+      // A deliberate workspace close is a kill, not a failed cleanup: stop() must not throw.
+      resolveExit({ exitCode: 143, signal: "SIGTERM", forced: true, ...(m.closed ? {} : { cleanupError: String(m.error) }) });
       return;
     }
     if (m.execId !== execId) return;

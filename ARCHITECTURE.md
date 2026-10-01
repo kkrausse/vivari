@@ -130,6 +130,14 @@ cleanup from `closed` or PID disappearance. `scripts/test-endpoint-cleanup.mjs`
 uses real Web Streams/MessagePorts with a transport fixture; it does not qualify
 kernel/OPFS ownership release or live TODO requests. No worker ABI changed.
 
+Close-path repairs (headless-verified only; see `test:single-kernel-close`):
+`Host.destroy()` is the synchronous hard kill. It always terminates the worker,
+rejects pending RPCs and runs every cleanup even when a handler throws, then
+rethrows the first handler/cleanup error. Its `host-error` broadcast carries
+`closed: true` for a deliberate close (a `WorkspaceError` with code `CLOSED`); an
+execution then settles as SIGTERM without `cleanupError`, so `stop()` does not
+throw `CLEANUP_FAILED`. Worker faults and other reasons still stamp it.
+
 This document explains how Vivari works end to end: the core constraint it
 solves, the worker topology, the syscall protocol, the filesystem, the process
 model, the Node runtime, networking, native code, and the build. It is the

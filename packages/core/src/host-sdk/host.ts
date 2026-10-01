@@ -74,7 +74,7 @@ export class Host {
       });
       diagnostics?.emit("worker.ready");
       return host;
-    } catch (error) { host.destroy(); throw error; }
+    } catch (error) { try { host.destroy(); } catch { /* the boot failure is the reported error */ } throw error; }
   }
   on(listener: Listener): () => void { this.handlers.add(listener); return () => { this.handlers.delete(listener); }; }
   async persistence(): Promise<PersistenceState> { return (await this.request("workspace-persistence")).persistence as PersistenceState; }
@@ -158,13 +158,20 @@ export class Host {
       announce();
     })();
   }
+  /** Synchronous hard kill. Termination and local cleanup are unconditional: a
+   * throwing handler/cleanup cannot skip them. The first such error is rethrown
+   * after everything has run. `closed` marks a deliberate close for handlers. */
   destroy(error: Error = new WorkspaceError("CLOSED", "Workspace closed")): void {
     if (this.dead) return;
     this.dead = true;
-    for (const h of this.handlers) h({ type: "host-error", error: error.message });
-    this.worker.terminate();
+    const failures: unknown[] = [];
+    const run = (step: () => void) => { try { step(); } catch (failure) { failures.push(failure); } };
+    const closed = error instanceof WorkspaceError && error.code === "CLOSED";
+    for (const h of this.handlers) run(() => h({ type: "host-error", error: error.message, closed }));
+    run(() => this.worker.terminate());
     for (const p of this.pending.values()) p.reject(error);
     this.pending.clear(); this.handlers.clear();
-    for (const cleanup of this.cleanup) cleanup();
+    for (const cleanup of this.cleanup) run(cleanup);
+    if (failures.length) throw failures[0];
   }
 }
