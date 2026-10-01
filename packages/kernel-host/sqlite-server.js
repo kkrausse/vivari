@@ -1,5 +1,6 @@
 // One live connection per VFS pathname; all SQL executes in the kernel owner.
-// Process workers use the synchronous SAB; commits acknowledge persistence flush.
+// Process workers use the synchronous SAB; commits acknowledge the persistence of
+// their own database file (not the whole mirror queue).
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 
 export async function createSqliteServer(vfs, persistence, initOptions = {}) {
@@ -30,7 +31,9 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
       const bytes = capi.sqlite3_js_db_export(c.db.pointer);
       vfs.write_file(c.path, bytes);
       persistence.onWrite(c.path);
-      await persistence.flush();
+      // Only this database's own file: an unrelated path's OPFS error must not
+      // poison the connection.
+      await persistence.flushPath(c.path);
     } catch (error) {
       c.poisoned = true; c.ioError = error; failedPaths.add(c.path);
       // The exited owner cannot be told: surface it on its release receipt.

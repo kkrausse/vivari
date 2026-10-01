@@ -151,6 +151,14 @@ A custom `spawnWorker` must return `unregister`'s result from `terminate()`.
 `test:single-kernel-lifecycle` drives this with the real Kernel/FsServer/SQLite/
 Rust VFS and a gated persistence fixture (not OPFS).
 
+SQLite durability is scoped to the database's own file. The OPFS mirror exposes
+`flushPath(path)`: it waits until that path is neither queued nor being written,
+forces the manifest that indexes it and fails only on that path's own error or
+the manifest's. A SQLite commit awaits `flushPath(c.path)`, so a path OPFS
+refuses elsewhere in the tree no longer poisons every database for the kernel's
+lifetime. Global `flush()` is unchanged and still reports every failed path
+(`workspace-flush`, page hide, shutdown).
+
 This document explains how Vivari works end to end: the core constraint it
 solves, the worker topology, the syscall protocol, the filesystem, the process
 model, the Node runtime, networking, native code, and the build. It is the

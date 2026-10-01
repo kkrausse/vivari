@@ -68,6 +68,10 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
   let draining = false;
   let manifestDirty = false;
   const errors = new Map();
+  // The path the drain is writing right now, and resolvers woken after each
+  // drained path, so flushPath() can wait for ONE path instead of the queue.
+  let active = null;
+  let stepWaiters = [];
   // The manifest is the WHOLE index serialized in one go, so its cost is O(paths
   // persisted) — and drain() used to rewrite it every time the queue emptied. When
   // OPFS is fast enough to keep up, the queue empties after almost every write, which
@@ -175,6 +179,7 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
         const path = pending.keys().next().value;
         const op = pending.get(path);
         pending.delete(path);
+        active = path;
         try {
           if (op === "d" || op === "r") {
             await removePath(path);
@@ -195,6 +200,11 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
           errors.delete(path);
         } catch (error) {
           errors.set(path, error);
+        } finally {
+          active = null;
+          const waiters = stepWaiters;
+          stepWaiters = [];
+          for (const wake of waiters) wake();
         }
       }
       if (manifestDirty) await maybeWriteManifest(false);
@@ -247,6 +257,20 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
     // durability is promised, so it must not be skipped.
     await maybeWriteManifest(true);
     if (errors.size) throw new Error("OPFS persistence failed: " + [...errors].map(([p, e]) => `${p}: ${e}`).join("; "));
+  }
+
+  // Durability for ONE path (SQLite commits): wait until `path` is neither queued
+  // nor being written, force the manifest that indexes it, and fail only on this
+  // path's own error or the manifest's. An unrelated path's failure stays in
+  // `errors` for flush() but does not fail this caller.
+  async function flushPath(path) {
+    while (pending.has(path) || active === path) {
+      kick();
+      await new Promise((resolve) => stepWaiters.push(resolve));
+    }
+    await maybeWriteManifest(true);
+    const error = errors.get(path) ?? errors.get(MANIFEST);
+    if (error) throw new Error(`OPFS persistence failed: ${errors.has(path) ? path : MANIFEST}: ${error}`);
   }
 
   // ---- boot restore --------------------------------------------------------
@@ -350,5 +374,5 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
     return n;
   }
 
-  return { onWrite, onDelete, onRename, flush, restore, shouldPersist, releaseOwnership };
+  return { onWrite, onDelete, onRename, flush, flushPath, restore, shouldPersist, releaseOwnership };
 }
