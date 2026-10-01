@@ -253,6 +253,8 @@ async function createOpfsDepStorage() {
 
   // Best-effort OPFS persistence. If the API is missing or throws (private
   // mode, quota, older engine), we run exactly like before — purely in RAM.
+  // The one exception is ownership: another live kernel still holding the lock
+  // after the bounded wait fails boot instead of silently dropping persistence.
   let persistence = null;
   accessRef = buildAccess(vfs);
   try {
@@ -285,6 +287,7 @@ async function createOpfsDepStorage() {
     }
   } catch (err) {
     persistence?.releaseOwnership();
+    if (err?.code === "STORAGE_BUSY") throw err;
     post("log", { line: "  [opfs] persistence unavailable: " + (err?.message || err), cls: "muted" });
     persistenceState = { status: "failed", error: String(err?.message || err) };
     persistence = null;

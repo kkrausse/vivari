@@ -21,6 +21,7 @@ import { newProgress, onFetch, onOutput, idleClear, stallVerdict, shouldReportSt
 import { Kernel } from "../../../kernel-host/kernel.js";
 import { sampleSyscallClients } from "../../../kernel-host/syscall-trace.js";
 import { createKernelFilesystem } from "./kernel-filesystem.ts";
+import { shutdownKernel } from "../../../kernel-host/kernel-shutdown.js";
 import { doFetch } from "./kernel-fetch.ts";
 import { initTransferList } from "../../../kernel-host/worker-transfer.js";
 import { ensureRealNpm } from "../../../kernel-host/load-real-npm.js";
@@ -1321,6 +1322,9 @@ function defaultTermCwd() {
 // The File System Worker handle, kept module-scoped so the page-hide flush relay
 // (host -> here -> FS worker) can reach it. Set in boot().
 let filesystemRef = null;
+// Set by the first `shutdown` request: the single graceful-close promise. Once
+// set, admission is closed and every other host message is refused.
+let shuttingDown = null;
 // Whole-file lazy compression gate for the VFS, sourced from the page at boot
 // (init.compress, the BootOptions.compress SDK flag) and relayed to the File
 // System Worker. On by default; a consumer sets it false only to trade memory
@@ -2428,6 +2432,22 @@ async function runSearch(m) {
 
 self.onmessage = async (event) => {
   const m = event.data;
+  // Graceful close (Host.close): finalize PIDs and join their receipts, flush the
+  // mirror, release storage ownership, then acknowledge with any cleanup errors.
+  // The host terminates this worker only after that acknowledgement.
+  if (m.type === "shutdown") {
+    shuttingDown ??= shutdownKernel({ kernel, persistence: filesystemRef?.server.persistence });
+    shuttingDown.then(
+      (errors) => post("vv-reply", { reqId: m.reqId, ok: true, errors }),
+      (error) => post("vv-reply", { reqId: m.reqId, ok: false, error: errMsg(error) }),
+    );
+    return;
+  }
+  if (shuttingDown) {
+    if (m.type === "proc-spawn") post("proc-exit", { execId: m.execId, code: 127, error: "workspace is shutting down" });
+    else if (m.reqId != null) post("vv-reply", { reqId: m.reqId, ok: false, error: "workspace is shutting down", code: "ERR_SHUTTING_DOWN" });
+    return;
+  }
   if (m.type === "workspace-install-tree" || m.type === "workspace-install-tree-image") {
     try {
       filesystemRef.handle(m);

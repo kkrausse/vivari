@@ -18,7 +18,8 @@ Service Worker remains a necessary HTTP relay, not a second runtime authority.
 initializes Wasm with an explicit URL, sets compression before OPFS restore,
 acquires the existing ownership lock, finishes restore, opens the dependency
 cache, installs FsServer and SQLite, then returns. OPFS initialization/restore
-failures release ownership; successful ownership lasts until kernel termination.
+failures release ownership; successful ownership lasts until graceful shutdown
+releases it or the kernel is terminated.
 The existing delete/recreate persistence queue is unchanged.
 
 Each guest retains its SAB and synchronous filesystem client; its MessagePort
@@ -158,6 +159,27 @@ the manifest's. A SQLite commit awaits `flushPath(c.path)`, so a path OPFS
 refuses elsewhere in the tree no longer poisons every database for the kernel's
 lifetime. Global `flush()` is unchanged and still reports every failed path
 (`workspace-flush`, page hide, shutdown).
+
+Graceful close is a protocol, not a bare `Worker.terminate()`. `Host.close()`
+sends `shutdown`; the kernel worker closes admission (every later host message is
+refused, `proc-spawn` gets a 127 `proc-exit`), then `kernel-shutdown.js` runs
+`Kernel.shutdown()` (finalize every live PID through `finalize`, join every
+cleanup receipt including in-flight SQLite), `persistence.flush()` and
+`persistence.releaseOwnership()`, and replies `vv-reply { ok, errors }`. The host
+terminates only after that acknowledgement. `close()` resolves only for an
+acknowledged clean shutdown; a timeout (default 30 s), reported cleanup errors, a
+worker fault or a prior `destroy()` still terminate and reject. Repeat/concurrent
+calls share one promise. `destroy()` remains the unproven hard kill.
+
+Reopen waits for the `vivari-vfs-owner` Web Lock with an `AbortSignal` bound
+(`lockTimeoutMs`, default 10 s) instead of `ifAvailable`. A timeout is a
+`STORAGE_BUSY` error that fails kernel boot (`Host.open` rejects with that code);
+it is no longer downgraded to an ephemeral workspace. Consequence: a second tab
+on the same origin now fails to boot after the bound instead of running without
+persistence. Other OPFS failures keep the best-effort ephemeral fallback.
+Headless coverage uses in-memory OPFS/Web Locks twins and a protocol fixture
+worker; `kernel-worker.ts`'s message wiring, real Web Locks, real OPFS and Chrome
+worker teardown are not exercised by any headless check.
 
 This document explains how Vivari works end to end: the core constraint it
 solves, the worker topology, the syscall protocol, the filesystem, the process

@@ -33,6 +33,14 @@ ENOENT. Durable snapshots require retained VFS ownership. Required backend init
 failures must release ownership. Worker opt-out URL flags must use searchParams;
 source-mode Vite worker URLs already contain a worker_file/type query.
 
+Close path: `Host.close()` (graceful `shutdown` acknowledgement, then terminate)
+is the proven close; `Host.destroy()` is the hard kill and proves nothing. A
+custom `spawnWorker` handle must return `FsServer.unregister(pid)`'s result from
+`terminate()`, or in-flight SQLite persistence is not joined by the exit receipt.
+SQLite awaits `persistence.flushPath(path)`, never the global `flush()`. Run
+`test:single-kernel-lifecycle` and `test:single-kernel-close` after touching
+finalize, FsServer registration, SQLite, OPFS persistence or the host SDK close.
+
 Guidance for AI agents (and humans) working in this repo. Read this first, then
 read [`ARCHITECTURE.md`](./ARCHITECTURE.md) before touching the runtime, the
 protocol, or networking. [`roadmap.md`](./roadmap.md) is the chronological log of

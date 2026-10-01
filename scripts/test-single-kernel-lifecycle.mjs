@@ -11,6 +11,7 @@ import { FsServer } from "../packages/kernel-host/fs-server.js";
 import { createDirectKernelFs } from "../packages/kernel-host/direct-kernel-fs.js";
 import { createSqliteServer } from "../packages/kernel-host/sqlite-server.js";
 import { createOpfsPersistence } from "../packages/kernel-host/opfs-persistence.js";
+import { shutdownKernel } from "../packages/kernel-host/kernel-shutdown.js";
 import * as p from "../packages/protocol/syscall.js";
 
 const require = createRequire(import.meta.url);
@@ -22,8 +23,9 @@ const turn = () => new Promise(setImmediate);
 const dec = new TextDecoder(), enc = new TextEncoder();
 
 // In-memory twin of the OPFS directory/file handle surface the mirror uses.
-// `fails(name)` makes writing that file reject, like a name or quota OPFS refuses.
-function memoryOpfs(fails = () => false) {
+// `fails(name)` makes writing that file reject, like a name or quota OPFS refuses;
+// `hold(name)` may return a promise the write waits on.
+function memoryOpfs(fails = () => false, hold = () => null) {
   const missing = () => Object.assign(new Error("not found"), { name: "NotFoundError" });
   const directory = () => {
     const entries = new Map();
@@ -37,7 +39,7 @@ function memoryOpfs(fails = () => false) {
         const file = entries.get(name);
         return { async createWritable() {
           let staged;
-          return { async write(bytes) { if (fails(name)) throw new Error("write refused"); staged = bytes.slice(); },
+          return { async write(bytes) { await hold(name); if (fails(name)) throw new Error("write refused"); staged = bytes.slice(); },
             async close() { file.bytes = staged; file.writes++; }, async abort() {} };
         } };
       },
@@ -190,6 +192,74 @@ for (const failure of [null, new Error("OPFS write failed")]) {
   f.kernel.stop(pid);
   persistence.releaseOwnership();
   console.log("PASS unrelated OPFS path error does not poison SQLite; own-path error still fails; global flush unchanged");
+}
+
+// Reopen: a just-closed kernel's lock is waited for (bounded), not refused at once,
+// and a timeout is a loud STORAGE_BUSY failure rather than a null persistence.
+{
+  browser.storage = { getDirectory: async () => memoryOpfs() };
+  const open = lockTimeoutMs => createOpfsPersistence({ access: vfsAccess(new VirtualFileSystem()), rootName: "lifecycle-reopen", lockTimeoutMs });
+  const first = await open(50);
+  await assert.rejects(open(50), error => error.code === "STORAGE_BUSY" && /still owned by another Vivari kernel after 50ms/.test(error.message));
+  assert.equal(browser.locks.queues.get("vivari-vfs-owner:lifecycle-reopen").length, 0, "timed-out waiter left the lock queue");
+  let reopened = false;
+  const second = open(5000).then(persistence => { reopened = true; return persistence; });
+  await turn(); await turn();
+  assert.equal(reopened, false, "reopen waits while the previous kernel still owns storage");
+  first.releaseOwnership();
+  (await second).releaseOwnership();
+  await turn();
+  assert.equal(browser.locks.held.has("vivari-vfs-owner:lifecycle-reopen"), false);
+  console.log("PASS reopen waits for the owner lock with a bound; timeout fails as STORAGE_BUSY (Web Locks twin)");
+}
+
+// Shutdown: admission closes, PIDs finalize and their receipts (in-flight SQLite)
+// are joined, the mirror is flushed, ownership is released, then errors are returned.
+for (const refuse of [false, true]) {
+  const name = `lifecycle-shutdown-${refuse}`, lock = `vivari-vfs-owner:${name}`;
+  let gate = null;
+  const root = memoryOpfs(file => refuse && file === "refused.txt", file => file === "app.db" ? gate?.promise : null);
+  browser.storage = { getDirectory: async () => root };
+  const vfs = new VirtualFileSystem();
+  const persistence = await createOpfsPersistence({ access: vfsAccess(vfs), rootName: name });
+  const f = await fixture(persistence, vfs);
+  const order = [];
+  const { flush, releaseOwnership } = persistence;
+  persistence.flush = async () => { order.push("flush"); try { await flush(); } finally { order.push("flushed"); } };
+  persistence.releaseOwnership = () => { order.push("release"); releaseOwnership(); };
+  f.kernel.onProcExit = (pid, result) => { order.push("exit"); f.exits.set(pid, result); };
+  const pid = f.spawn(), idle = f.spawn();
+  const { id } = await f.call(pid, { method: "open", path: "/data/app.db" });
+  gate = deferred();
+  const sent = f.send(pid, { method: "execute", id, sql: "CREATE TABLE t(v)" });
+  f.kernel.writeFile("/data/note.txt", "queued behind the database");
+  if (refuse) f.kernel.writeFile("/data/refused.txt", "x");
+  await turn();
+  let acknowledged = null;
+  const shutdown = shutdownKernel({ kernel: f.kernel, persistence }).then(errors => acknowledged = errors);
+  await turn(); await turn();
+  assert.equal(f.kernel.procs.size, 0, "every live PID was finalized");
+  assert.equal(f.exits.has(idle), true);
+  assert.equal(f.exits.has(pid), false, "PID with in-flight SQLite has not published its exit");
+  assert.equal(acknowledged, null, "no acknowledgement while a receipt is pending");
+  assert.deepEqual(order, ["exit"], "flush and release wait for the receipts");
+  assert.equal(browser.locks.held.has(lock), true);
+  assert.equal(f.kernel.launch("/bin/node.js", ["/fixture.js"], { cwd: "/" }), -1, "admission is closed");
+  assert.throws(() => f.kernel.createProcess({ programPath: "/bin/node.js" }), /shut down/);
+  gate.resolve(); gate = null;
+  const errors = await shutdown;
+  assert.deepEqual(order, ["exit", "exit", "flush", "flushed", "release"]);
+  assert.equal(sent.state(), p.STATE_REQUEST);
+  const stored = (await (await (await root.getDirectoryHandle(name)).getDirectoryHandle("files")).getDirectoryHandle("data")).entries;
+  assert.deepEqual(stored.get("app.db").bytes, vfs.read_file("/data/app.db"));
+  assert.equal(dec.decode(stored.get("note.txt").bytes), "queued behind the database");
+  await turn();
+  assert.equal(browser.locks.held.has(lock), false, "ownership released for the next kernel");
+  if (refuse) { assert.equal(errors.length, 1); assert.match(errors[0], /refused\.txt: Error: write refused/); }
+  else assert.deepEqual(errors, []);
+  // The released lock is immediately available to a reopening kernel.
+  (await createOpfsPersistence({ access: vfsAccess(new VirtualFileSystem()), rootName: name, lockTimeoutMs: 50 })).releaseOwnership();
+  console.log(`PASS shutdown joins receipts, flushes, releases ownership, then reports ${refuse ? "the flush error" : "clean"}`);
 }
 
 clearTimeout(deadline);

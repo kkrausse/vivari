@@ -1,6 +1,7 @@
 import { parentPort } from "node:worker_threads";
 const channels = new Set();
 let cancellations = 0;
+let shutdownMode = "clean";
 parentPort.on("message", message => {
   if (message.type === "init") parentPort.postMessage({ type: "ready" });
   else if (message.type === "workspace-http-stream") {
@@ -19,6 +20,12 @@ parentPort.on("message", message => {
     if (message.request.path !== "/never") channel.postMessage({ op: "headers", status: 200, headers: [] });
   } else if (message.type === "vv-stat") parentPort.postMessage({ type: "vv-reply", reqId: message.reqId, ok: true, exists: true, isDir: false });
   else if (message.type === "proc-spawn") parentPort.postMessage({ type: "proc-started", execId: message.execId });
+  else if (message.type === "fixture-shutdown-mode") { shutdownMode = message.mode; parentPort.postMessage({ type: "vv-reply", reqId: message.reqId, ok: true }); }
+  else if (message.type === "shutdown") {
+    // Stand-in for the kernel's acknowledgement only; no real cleanup happens here.
+    if (shutdownMode === "silent") return;
+    setTimeout(() => parentPort.postMessage({ type: "vv-reply", reqId: message.reqId, ok: true, errors: shutdownMode === "errors" ? ["flush failed"] : [] }), 20);
+  }
   else if (message.type === "workspace-flush") parentPort.postMessage({ type: "vv-reply", reqId: message.reqId, ok: true });
   else if (message.type === "fixture-state") {
     // A parentPort message and a transferred-port message have no total order.

@@ -26,6 +26,10 @@ export interface NodeLaunchOptions {
   env?: Record<string, string>;
   signal?: AbortSignal;
 }
+export interface HostCloseOptions {
+  /** Bound on the kernel's shutdown acknowledgement. Default 30000. */
+  timeoutMs?: number;
+}
 export interface Execution {
   readonly stdout: AsyncIterable<Uint8Array>;
   readonly stderr: AsyncIterable<Uint8Array>;

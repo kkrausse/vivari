@@ -1,6 +1,6 @@
 import { WorkspaceError, type Distribution } from "./types.js";
 import type { diagnosticReporter } from "./diagnostics.js";
-import type { PersistenceState, InstallTreeEntry, InstallTreeImageEntry, TreeInstallResult } from "./types.js";
+import type { PersistenceState, InstallTreeEntry, InstallTreeImageEntry, TreeInstallResult, HostCloseOptions } from "./types.js";
 
 // Private transport boundary. Worker protocol never escapes to consumers.
 export type Message = { type: string; [key: string]: unknown };
@@ -64,7 +64,10 @@ export class Host {
           if (m.type === "workspace-persistence") diagnostics?.emit("worker.persistence", { status: m.status });
           if (m.type === "ready") done();
           if (m.type === "host-error") done(new Error(String(m.error)));
-          if (m.type === "log" && String(m.line).startsWith("kernel worker boot failed:")) done(new Error(String(m.line)));
+          if (m.type === "log" && String(m.line).startsWith("kernel worker boot failed:")) {
+            // Another live kernel still owns storage after the bounded lock wait.
+            done(String(m.line).includes("OPFS still owned") ? new WorkspaceError("STORAGE_BUSY", String(m.line)) : new Error(String(m.line)));
+          }
         });
         function done(error?: Error) { clearTimeout(timer); off(); signal?.removeEventListener("abort", abort); error ? reject(error) : resolve(); }
         signal?.addEventListener("abort", abort, { once: true });
@@ -156,6 +159,33 @@ export class Host {
       navigator.serviceWorker.addEventListener("controllerchange", announce);
       this.cleanup.push(() => { navigator.serviceWorker.removeEventListener("message", relay); navigator.serviceWorker.removeEventListener("controllerchange", announce); });
       announce();
+    })();
+  }
+  private closing?: Promise<void>;
+  /** Graceful close. The kernel finalizes every process, joins their cleanup,
+   * flushes persistence and releases storage ownership, then acknowledges; only
+   * then is the worker terminated. On timeout, a reported cleanup error or any
+   * other failure the worker is still terminated and the promise REJECTS with the
+   * reason: it resolves only for a proven clean close. Idempotent: concurrent and
+   * repeat calls return the same promise. */
+  close(options: HostCloseOptions = {}): Promise<void> {
+    return this.closing ??= (async () => {
+      const timeoutMs = options.timeoutMs ?? 30_000;
+      let failure: unknown, failed = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const ack = this.request("shutdown");
+        void ack.catch(() => {}); // after a timeout destroy() rejects it unobserved
+        const reply = await Promise.race([ack, new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new WorkspaceError("CLEANUP_FAILED", `Workspace shutdown was not acknowledged within ${timeoutMs}ms`)), timeoutMs);
+        })]);
+        const errors = Array.isArray(reply.errors) ? reply.errors.map(String) : [];
+        if (errors.length) { failed = true; failure = new WorkspaceError("CLEANUP_FAILED", errors.join("; ")); }
+      } catch (error) { failed = true; failure = error; }
+      finally { clearTimeout(timer); }
+      try { if (failed && failure instanceof Error) this.destroy(failure); else this.destroy(); }
+      catch (error) { if (!failed) { failed = true; failure = error; } }
+      if (failed) throw failure;
     })();
   }
   /** Synchronous hard kill. Termination and local cleanup are unconditional: a

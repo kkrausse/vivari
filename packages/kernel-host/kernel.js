@@ -114,6 +114,7 @@ export class Kernel {
     this.stdout = stdout || (() => {});
     this.stderr = stderr || (() => {});
     this.procs = new Map(); // pid -> process record
+    this.closed = false; // set by shutdown(): no further process is admitted
     this.nextPid = 1;
     this.onProcExit = null; // optional observer (pid, result)
 
@@ -440,7 +441,8 @@ export class Kernel {
     // browser kills the kernel worker and with it every process, the VFS session
     // and the preview. An unresolvable command is an ENOENT to the caller, which
     // is what a non-string is.
-    if (typeof command !== "string" || command === "") return null;
+    // After shutdown() nothing resolves, so every launch path reports not-found.
+    if (this.closed || typeof command !== "string" || command === "") return null;
     const candidates = [];
     if (command.includes("/")) {
       const abs = this.resolvePath(cwd, command);
@@ -460,6 +462,7 @@ export class Kernel {
 
   // ---- process lifecycle ----------------------------------------------------
   createProcess(spec, { parentPid = null, capture = false, stream = false, threadPort = null, captureLimit = null } = {}) {
+    if (this.closed) throw new Error("Kernel is shut down");
     const pid = this.nextPid++;
     const sab = new SharedArrayBuffer(SAB_BYTES);
     const { ctrl, data } = makeViews(sab);
@@ -1154,6 +1157,23 @@ export class Kernel {
   /** Stop a running process: terminate its worker + release its ports. */
   stop(pid) {
     return this.finalize(pid, 143, "SIGTERM");
+  }
+
+  /**
+   * Graceful close: admit no further process, finalize every live PID through
+   * finalize() and join every cleanup receipt, including ones already pending
+   * for exited PIDs. Resolves with the cleanup error messages (empty = clean).
+   */
+  async shutdown() {
+    this.closed = true;
+    const receipts = new Set(this._processCleanup.values());
+    for (const pid of [...this.procs.keys()]) {
+      const receipt = this.finalize(pid, 143, "SIGTERM");
+      if (receipt) receipts.add(receipt);
+    }
+    const outcomes = await Promise.allSettled([...receipts]);
+    return outcomes.filter((outcome) => outcome.status === "rejected")
+      .map((outcome) => String(outcome.reason?.message || outcome.reason));
   }
 
   /** Start a top-level process; resolves with { pid, code, stdout, stderr }. */

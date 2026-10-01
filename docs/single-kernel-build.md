@@ -176,3 +176,14 @@ Follow-up verification: extended `test-sync-capture`, `test-single-kernel`,
 `test-single-kernel-routing`, `test-single-kernel-review`, full `verify-node`,
 core `tsc --noEmit`, and `git diff --check`: PASS. Browser checks of this follow-up
 remain separate from integration's frozen `f545699` results.
+
+## Close-path lifecycle repair (source only; coordinated rebuild required)
+
+Four source fixes on `fix/single-kernel-lifecycle`: unconditional `Host.destroy`
+termination with deliberate-close classification, joined SQLite release, per-path
+SQLite durability (`flushPath`), and the `shutdown` protocol with `Host.close()`
+plus a bounded owner-lock wait. Kernel and host bundles must be rebuilt together:
+an old kernel ignores `shutdown`, so `Host.close()` times out, terminates and
+rejects. No SAB layout or opcode changed. Verification is headless only
+(`test-single-kernel-lifecycle`, `test-single-kernel-close`); Web Locks, OPFS and
+Chrome worker teardown still need isolated browser qualification.

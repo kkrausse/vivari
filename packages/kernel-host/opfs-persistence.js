@@ -38,15 +38,25 @@ const MANIFEST = "manifest.json";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-export async function createOpfsPersistence({ access, shouldPersist = () => true, rootName = ROOT_DIR }) {
+export async function createOpfsPersistence({ access, shouldPersist = () => true, rootName = ROOT_DIR, lockTimeoutMs = 10000 }) {
   if (!navigator.locks) throw new Error("OPFS ownership requires Web Locks");
   let releaseOwnership = () => {};
   await new Promise((resolve, reject) => {
-    navigator.locks.request(rootName === ROOT_DIR ? "vivari-vfs-owner" : `vivari-vfs-owner:${rootName}`, { ifAvailable: true }, lock => {
-      if (!lock) { reject(new Error("OPFS already owned by another Vivari kernel")); return; }
+    // A kernel that was just closed or terminated may not have released the lock
+    // yet, so wait for it — bounded. A timeout is a distinct STORAGE_BUSY failure
+    // the caller must not downgrade to running without persistence.
+    const waiting = new AbortController();
+    const timer = setTimeout(() => waiting.abort(), lockTimeoutMs);
+    navigator.locks.request(rootName === ROOT_DIR ? "vivari-vfs-owner" : `vivari-vfs-owner:${rootName}`, { signal: waiting.signal }, () => {
+      clearTimeout(timer);
       resolve();
       return new Promise(resolve => { releaseOwnership = resolve; });
-    }).catch(reject);
+    }).catch(error => {
+      clearTimeout(timer);
+      reject(waiting.signal.aborted
+        ? Object.assign(new Error(`OPFS still owned by another Vivari kernel after ${lockTimeoutMs}ms`), { code: "STORAGE_BUSY" })
+        : error);
+    });
   });
   let base, filesBase;
   try {

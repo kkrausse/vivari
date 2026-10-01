@@ -133,6 +133,31 @@ try {
     await host.worker.exited;
     console.log(`PASS ${deliberate ? "deliberate close" : "worker fault"}: execution cleanup classification`);
   }
+  for (const mode of ["clean", "errors", "silent", "destroyed"]) {
+    // Host.close: terminate only after the shutdown acknowledgement; never resolve an unproven close.
+    const host = await Host.open({ assetBaseUrl: "/runtime/", version: "fixture" });
+    await host.request("fixture-shutdown-mode", { mode });
+    const execution = await launch(host, { entry: "/fixture.js" });
+    if (mode === "destroyed") host.destroy();
+    const closing = host.close({ timeoutMs: 200 });
+    assert.equal(host.close(), closing, "concurrent close returns the same promise");
+    if (mode !== "destroyed") assert.equal(host.worker.terminations, 0, "no termination before the acknowledgement");
+    if (mode === "clean") {
+      await closing;
+      assert.equal("cleanupError" in await execution.exited, false);
+    } else if (mode === "errors") {
+      await assert.rejects(closing, error => error.code === "CLEANUP_FAILED" && error.message === "flush failed");
+      assert.equal((await execution.exited).cleanupError, "flush failed");
+    } else if (mode === "silent") {
+      await assert.rejects(closing, error => error.code === "CLEANUP_FAILED" && /not acknowledged within 200ms/.test(error.message));
+    } else await assert.rejects(closing, error => error.code === "CLOSED", "a hard-killed host cannot prove a graceful close");
+    assert.equal(host.worker.terminations, 1, `${mode}: terminated exactly once`);
+    await host.worker.exited;
+    assert.equal(host.close(), closing, "repeat close returns the same promise");
+    assert.equal(host.pending.size, 0);
+    assert.throws(() => host.post("anything"), error => error.code === "CLOSED");
+    console.log(`PASS Host.close ${mode}: ${mode === "clean" ? "resolves after acknowledgement, then terminates" : "terminates and rejects"}`);
+  }
   assert.equal(observer.entries.filter(event => event.kind === "kernel-created").length, workers.length);
   assert.equal(observer.entries.filter(event => event.kind === "terminate-called").length, workers.length);
   assert.equal(observer.entries.filter(event => event.kind === "terminate-returned").length, workers.length);
