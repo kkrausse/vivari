@@ -397,17 +397,33 @@ function scanExportEdits(src, isFrom) {
   return edits;
 }
 
-function applyEdits(src, edits) {
+// The edits that will actually be applied, as [start, end, text] in source order:
+// sorted, with overlaps dropped defensively.
+function settleEdits(edits) {
   edits.sort((a, b) => a.start - b.start);
-  let out = "";
+  const settled = [];
   let last = 0;
   for (const e of edits) {
-    if (e.start < last) continue; // drop overlaps defensively
-    out += src.slice(last, e.start) + e.text;
+    if (e.start < last) continue;
+    settled.push([e.start, e.end, e.text]);
     last = e.end;
+  }
+  return settled;
+}
+
+function applySettledEdits(src, settled) {
+  let out = "";
+  let last = 0;
+  for (const [start, end, text] of settled) {
+    out += src.slice(last, start) + text;
+    last = end;
   }
   out += src.slice(last);
   return out;
+}
+
+function applyEdits(src, edits) {
+  return applySettledEdits(src, settleEdits(edits));
 }
 
 // [A-Za-z0-9_$] by char code: what `[\w$]` matches (no unicode flag).
@@ -559,6 +575,75 @@ export function rewriteDynamicImportToGlobal(body) {
  * file has no module syntax at all (pure CJS — load it unchanged).
  */
 export function transpileEsm(source, filename) {
+  const plan = planEsm(source, filename);
+  return plan && applyEsmPlan(source, plan);
+}
+
+/** The transpiled text for `source` from a plan made for exactly that source. */
+export function applyEsmPlan(source, plan) {
+  return plan.head + applySettledEdits(source, plan.edits) + plan.tail;
+}
+
+// Identifies this transpiler's behaviour, for anything that stores its plans: the
+// source text of every function a plan depends on, plus the plan of a probe module
+// that exercises each edit kind (which also covers the vendored lexer). Any change
+// to the code changes it, so a stored plan is never applied by a transpiler other
+// than the one that made it, without a hand-maintained version number.
+let planVersion = null;
+export function esmPlanVersion() {
+  if (planVersion == null) {
+    // Bare specifiers on purpose: this text ends up inside the built worker
+    // bundles, and a consumer that scans those for `import … from './x.js'` to
+    // find its real chunk references must not find any here.
+    const probe =
+      "import d, { a as b, c } from 'probe-x';\nimport * as ns from 'probe-y';\nimport 'probe-z';\n" +
+      "export { c };\nexport * from 'probe-w';\nexport { q as r } from 'probe-v';\n" +
+      "export const k = b + ns.v + import.meta.url;\nexport default function f() { return import('probe-u'); }\n" +
+      "export { k as 'module.exports' };\nawait d;\n";
+    const parts = [planEsm, settleEdits, applySettledEdits, scanExportEdits, wordsUsedOutside, parseImportClause,
+      namedFromBraces, helpers, importMetaSource, skipQuoted, skipTemplate, skipBalanced, canStartRegex, parse]
+      .map(String);
+    parts.push(JSON.stringify(planEsm(probe, "/probe.mjs")));
+    planVersion = hashText(parts.join("\n"));
+  }
+  return planVersion;
+}
+
+// A 64-bit non-cryptographic content hash (two 32-bit xor-multiply lanes with
+// different seeds and multipliers, fed two UTF-16 units at a time) plus the
+// length, as text. It identifies module sources to the plan cache, so it guards
+// against accidental collisions only. Every process start that loads a very
+// large module pays it once, cold: about 22 ms for 27.5 M characters in a fresh
+// Chrome worker. Keep each lane a single xor and multiply; a lane that also mixed
+// in a shift of itself measured 144 ms there.
+export function hashText(text) {
+  let a = 0x811c9dc5;
+  let b = 0x9e3779b9;
+  const n = text.length;
+  const paired = n - (n & 1);
+  let i = 0;
+  for (; i < paired; i += 2) {
+    const c = text.charCodeAt(i) | (text.charCodeAt(i + 1) << 16);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ c, 0x85ebca6b);
+  }
+  if (i < n) {
+    const c = text.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ c, 0x85ebca6b);
+  }
+  return (a >>> 0).toString(16).padStart(8, "0") + (b >>> 0).toString(16).padStart(8, "0") + "-" + n.toString(36);
+}
+
+/**
+ * The transpile of `source` as data: `{ head, edits, tail }`, where the output is
+ * `head + (source with each [start, end, text] edit applied) + tail`. Everything
+ * expensive (the lexer parse, the export scan, the used-name pass) goes into
+ * making the plan; applying one is a few hundred slices. module-plan-cache.js
+ * stores plans for very large modules so a later process start skips the making.
+ * Null for a file with no module syntax, like transpileEsm.
+ */
+export function planEsm(source, filename) {
   let parsed;
   try {
     parsed = parse(source, filename || "module");
@@ -777,7 +862,7 @@ export function transpileEsm(source, filename) {
   // matching `export { x as "module.exports" }` semantics. The override value is
   // authored to carry its own default/named props, so dropping our getters is fine.
   const tail = cjsOverride ? "\n;__oc_module.exports=" + cjsOverride + ";" : "";
-  return head + applyEdits(source, edits) + tail;
+  return { head, edits: settleEdits(edits), tail };
 }
 
 /**

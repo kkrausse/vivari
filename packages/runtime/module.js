@@ -7,7 +7,8 @@
 // directory/index/package.json "main"), and bare specifiers walked up through
 // node_modules.
 
-import { transpileEsm, transpileEsmLive, rewriteCjsDynamicImport } from "./esm.js";
+import { transpileEsm, transpileEsmLive, rewriteCjsDynamicImport, planEsm, applyEsmPlan } from "./esm.js";
+import { createModulePlanCache } from "./module-plan-cache.js";
 import { maybePatchEsbuildInProcess } from "./esbuild-inproc-patch.js";
 import { maybeTranspileTypeScript } from "./typescript-transform.js";
 // The native-addon message. It is in builtins/ next to the rest of the
@@ -98,6 +99,7 @@ export function parseShellShimTarget(source) {
 
 export function createModuleSystem({ fs, path, builtins, process, globals, nodeModules }) {
   const cache = Object.create(null);
+  const modulePlans = createModulePlanCache({ fs, process });
   // The entry module (Node's `require.main` / `process.mainModule`). Set by
   // runMain; every require's `require.main` points at it.
   let mainModule = undefined;
@@ -608,8 +610,16 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
     // plain CJS, so require/module.exports files are untouched).
     let isEsm = false;
     let esmSource = null; // pre-transpile ESM source, kept for the live-binding fallback
+    // For a very large module (a bundled server), the transpile plan and whether it
+    // needs the async wrapper are remembered across process starts, keyed by the
+    // source's content: see module-plan-cache.js. `remembered` is null otherwise.
+    let remembered = null;
+    let madePlan = null;
     if (path.extname(filename) !== ".cjs") {
-      const esm = transpileEsm(source, filename);
+      remembered = modulePlans.lookup(source, filename);
+      if (remembered && !remembered.plan) madePlan = planEsm(source, filename);
+      const plan = remembered ? remembered.plan ?? madePlan : null;
+      const esm = remembered ? plan && applyEsmPlan(source, plan) : transpileEsm(source, filename);
       if (esm != null) {
         esmSource = source;
         source = esm;
@@ -651,7 +661,18 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
     // offset costs — see compileWrapper.
     let wrapper;
     let isAsync = false;
-    try {
+    // Remembered as needing the async wrapper (top-level await): compile it that
+    // way first instead of failing the plain compile on the whole text and then
+    // retrying. If this fails the ordinary sequence below runs and reports.
+    if (isEsm && remembered?.plan?.async) {
+      try {
+        wrapper = compileWrapper(ESM_PARAMS, source, filename, true);
+        isAsync = true;
+      } catch {
+        wrapper = undefined;
+      }
+    }
+    if (!wrapper) try {
       wrapper = isEsm
         ? compileWrapper(ESM_PARAMS, source, filename, false)
         : compileWrapper(CJS_PARAMS, source, filename, false);
@@ -707,6 +728,8 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
         }
       }
     }
+    // The module compiled: remember the plan just made, and how it compiled.
+    if (isEsm && madePlan) modulePlans.store(remembered, madePlan, isAsync);
     // Run an ESM wrapper with the live-binding fallback: a circular import of a
     // const/class/singleton reads its source binding eagerly (`const X = m.X`), before
     // the source finished initialising → "Cannot access 'X' before initialization" (or,

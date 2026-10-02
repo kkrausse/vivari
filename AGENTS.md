@@ -4210,6 +4210,17 @@ also unchanged.
   `require()` returns `X` directly; `export { X as default }` sets
   `exports.default`. Getting these wrong yields `TypeError: x is not a function`
   on a plugin's default export.
+- **The transpile is a plan, and plans for very large modules are remembered.**
+  `planEsm` returns `{ head, edits, tail }`; `transpileEsm` applies it. For a module
+  of 2 MiB or more (a bundled server), `module-plan-cache.js` stores the plan and
+  whether the module needed the async wrapper under `/var/lib/vivari/module-plans`
+  (mirrored to OPFS), keyed by a content hash of the source, the path and
+  `esmPlanVersion()` (derived from the transpiler's own code, so there is no version
+  to bump). A later start applies the plan and compiles once instead of
+  re-planning and failing the plain compile on top-level await. Keep anything a plan
+  depends on inside the functions `esmPlanVersion` fingerprints, and keep output a
+  pure function of (source, filename). `test:module-plan-cache` holds the hit/miss
+  rules; `VV_NO_MODULE_PLAN_CACHE=1` turns it off.
 - **`__esModule` is not proof of a `default` — the static unwrap requires the key.**
   `tsc --module commonjs` stamps the flag on every file it emits, including ones that
   only assign named exports, so it means "transpiled", not "has a default". Babel's rule
