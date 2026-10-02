@@ -55,7 +55,13 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
       // poisons the connection, so a version recorded for an image that never
       // reached the mirror is never trusted.
       c.persistedVersion = version;
-      vfs.write_file(c.path, bytes);
+      // Stored raw (encoding 0), not through write_file: write_file zlib-compresses
+      // every body of 4 KiB or more, and the drain's read-back would inflate it
+      // again, on every commit. The mirror stores plain bytes either way, and a
+      // body an earlier write_file or the boot restore left compressed is simply
+      // replaced. Only this file is exempt; nothing else about VFS compression moves.
+      if (typeof vfs.write_file_body === "function") vfs.write_file_body(c.path, bytes, bytes.length, 0);
+      else vfs.write_file(c.path, bytes);
       persistence.onWrite(c.path);
       // Only this database's own file: an unrelated path's OPFS error must not
       // poison the connection.

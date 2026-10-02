@@ -90,6 +90,7 @@ async function boot(root, rootName) {
     vfs.write_file(input, enc.encode(JSON.stringify(req)));
     await sqlite.request(1, input);
     const response = JSON.parse(dec.decode(vfs.read_file(input + ".out")));
+    for (const file of [input, input + ".out"]) vfs.unlink(file); // as the guest does
     if (response.error) throw new Error(response.error);
     return response.result;
   }
@@ -197,10 +198,15 @@ console.log(`PASS mirror equals the live database after each of ${battery.length
   await expect(1, "the committed prefix of an exec that ends inside a transaction is persisted", () =>
     exec(k, id, "INSERT INTO t(b) VALUES ('prefix'); BEGIN; INSERT INTO t(b) VALUES ('uncommitted')"));
   const acknowledged = Uint8Array.from((await k.stored()).bytes);
+  // The database is the only body of 4 KiB or more in this VFS, and it is mostly
+  // empty pages: held compressed, physical bytes would be well under logical.
+  const raw = vfs => vfs.mem_bytes() === vfs.logical_mem_bytes();
+  assert.equal(raw(k.vfs), true, "a persisted image is held raw in the VFS, not zlib-compressed on every commit");
 
   // The kernel goes away with that transaction still open (its connection is
   // closed uncommitted). A new kernel restores the mirror.
   k = await (async () => { await k.shutdown(); return boot(root, name); })();
+  assert.equal(raw(k.vfs), false, "the boot restore still compresses the image like any other file");
   ({ id } = await k.call({ method: "open", path: DB }));
   assert.equal((await k.stored()).bytes.length, acknowledged.length);
   assert.deepEqual((await run(k, id, "SELECT b FROM t ORDER BY a")).rows.map(row => row[0][1]), ["one", "two", "three", "four", "five", "prefix"],
@@ -209,8 +215,10 @@ console.log(`PASS mirror equals the live database after each of ${battery.length
   const before = (await k.stored()).writes;
   await run(k, id, "SELECT * FROM t");
   assert.equal((await k.stored()).writes, before, "opening and reading an existing database rewrites nothing");
+  assert.equal(raw(k.vfs), false, "a compressed body is opened and read in place");
   await run(k, id, "INSERT INTO t(b) VALUES ('after restart')");
   assert.equal((await k.stored()).writes, before + 1);
+  assert.equal(raw(k.vfs), true, "the first write replaces a compressed body with a raw one");
   await k.durable(id, "a write after restart");
   await k.shutdown();
   console.log("PASS reads, prepares, connection PRAGMAs, no-op DDL and rollbacks rewrite nothing; each committed change is persisted once and survives a restart");
