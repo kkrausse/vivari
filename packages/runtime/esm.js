@@ -410,6 +410,81 @@ function applyEdits(src, edits) {
   return out;
 }
 
+// [A-Za-z0-9_$] by char code: what `[\w$]` matches (no unicode flag).
+const WORD_CODE = new Uint8Array(128);
+for (const ch of "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$") WORD_CODE[ch.charCodeAt(0)] = 1;
+
+// Which of `names` occur in `src` as a whole word, ignoring the `ranges`
+// ([start, end) pairs)? A whole word is what
+//   new RegExp("(?:^|[^\\w$])" + name + "(?![\\w$])")
+// finds in a copy of `src` whose ranges are blanked to spaces (newlines kept):
+// for a name made only of [\w$] that is exactly "some maximal run of [\w$]
+// outside the ranges equals the name". So one pass over the source collects the
+// runs and looks each up, instead of copying the source (`split("")`, blank,
+// `join("")`) and then running one regex per name over the whole copy — which on
+// a 27.5 M-character bundle with 217 imports was about 0.9 s of a 1.1 s transpile.
+// Names with any other character (a non-ASCII identifier) keep the regex, over a
+// blanked copy built only when one exists.
+function wordsUsedOutside(src, names, ranges) {
+  const used = new Set();
+  const wanted = new Set();
+  const others = new Set();
+  for (const name of names) (/^[\w$]+$/.test(name) ? wanted : others).add(name);
+  const n = src.length;
+  // Sorted, clamped and merged, so the gaps between them are the text to search.
+  const gaps = [];
+  let last = 0;
+  for (const [start, end] of ranges.map(([s, e]) => [Math.min(s, n), Math.min(e, n)]).sort((a, b) => a[0] - b[0])) {
+    if (start > last) gaps.push([last, start]);
+    if (end > last) last = end;
+  }
+  if (last < n) gaps.push([last, n]);
+  if (wanted.size) {
+    let longest = 0;
+    for (const name of wanted) if (name.length > longest) longest = name.length;
+    // A run is looked up only if a wanted name has its length and its first and
+    // last characters: that rejects nearly every run without building a string.
+    const hasLength = new Uint8Array(longest + 1);
+    const hasEnds = new Uint8Array(128 * 128);
+    for (const name of wanted) {
+      hasLength[name.length] = 1;
+      hasEnds[name.charCodeAt(0) * 128 + name.charCodeAt(name.length - 1)] = 1;
+    }
+    scan: for (const [from, to] of gaps) {
+      let i = from;
+      while (i < to) {
+        let c = src.charCodeAt(i);
+        if (c < 128 && WORD_CODE[c]) {
+          const start = i++;
+          while (i < to && (c = src.charCodeAt(i)) < 128 && WORD_CODE[c]) i++;
+          const length = i - start;
+          if (length <= longest && hasLength[length] && hasEnds[src.charCodeAt(start) * 128 + src.charCodeAt(i - 1)]) {
+            const word = src.slice(start, i);
+            if (wanted.has(word) && !used.has(word)) {
+              used.add(word);
+              if (used.size === wanted.size) break scan;
+            }
+          }
+        } else i++;
+      }
+    }
+  }
+  if (others.size) {
+    let masked = "";
+    let at = 0;
+    for (const [from, to] of gaps) {
+      masked += src.slice(at, from).replace(/[^\n]/g, " ") + src.slice(from, to);
+      at = to;
+    }
+    masked += src.slice(at).replace(/[^\n]/g, " ");
+    for (const name of others) {
+      const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (new RegExp("(?:^|[^\\w$])" + esc + "(?![\\w$])").test(masked)) used.add(name);
+    }
+  }
+  return used;
+}
+
 /**
  * Rewrite dynamic `import()` in a PURE-CJS module so it routes through our
  * synchronous loader instead of the host realm's native `import()`. Without this,
@@ -617,23 +692,18 @@ export function transpileEsm(source, filename) {
   // toward KEEPING the eager snapshot (current behaviour) — it only ever removes a
   // snapshot when the name is provably absent from executable code.
   if (deferredNamedConsts.length) {
-    const masked = source.split("");
-    const blank = (s, e) => { for (let k = s; k < e && k < masked.length; k++) if (masked[k] !== "\n") masked[k] = " "; };
-    for (const imp of imports) if (imp.t === T_STATIC) blank(imp.ss, imp.se);
-    for (const e of exportEdits) if (/^export\s*\{/.test(source.slice(e.start, e.end))) blank(e.start, e.end);
-    const maskedStr = masked.join("");
-    const usedInBody = (name) => {
-      const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      // Any identifier-boundaried occurrence counts as a use. We deliberately do NOT
-      // try to discount `obj.X` member access: a `.`-preceded match is ambiguous with
-      // spread/rest `...X` (e.g. `[...SVELTE_DEDUPED_IMPORTS]`, `...SUPPORTED_MARKDOWN_
-      // FILE_EXTENSIONS`), and mis-classifying a real spread use as "unused" drops the
-      // eager `const` → "X is not defined". Keeping an occasional truly-unused const is
-      // harmless; dropping a needed one is not — so we err toward keeping.
-      return new RegExp("(?:^|[^\\w$])" + esc + "(?![\\w$])").test(maskedStr);
-    };
+    const blanked = [];
+    for (const imp of imports) if (imp.t === T_STATIC) blanked.push([imp.ss, imp.se]);
+    for (const e of exportEdits) if (/^export\s*\{/.test(source.slice(e.start, e.end))) blanked.push([e.start, e.end]);
+    // Any identifier-boundaried occurrence counts as a use. We deliberately do NOT
+    // try to discount `obj.X` member access: a `.`-preceded match is ambiguous with
+    // spread/rest `...X` (e.g. `[...SVELTE_DEDUPED_IMPORTS]`, `...SUPPORTED_MARKDOWN_
+    // FILE_EXTENSIONS`), and mis-classifying a real spread use as "unused" drops the
+    // eager `const` → "X is not defined". Keeping an occasional truly-unused const is
+    // harmless; dropping a needed one is not — so we err toward keeping.
+    const used = wordsUsedOutside(source, deferredNamedConsts.map((nc) => nc.local), blanked);
     for (const nc of deferredNamedConsts) {
-      if (usedInBody(nc.local)) {
+      if (used.has(nc.local)) {
         prelude.push("const " + nc.local + "=" + nc.m + "[" + JSON.stringify(nc.imported) + "];");
       }
     }

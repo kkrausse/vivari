@@ -159,6 +159,34 @@ console.log("\n== [esm] spread-only use keeps the eager const ==");
   // assert the spread case (the one that actually broke).
 }
 
+// ── 3b. which named imports get an eager const ───────────────────────────────
+// A name counts as used when it appears as a whole word anywhere outside import
+// statements and local `export { … }` clauses. The check is one pass over the
+// source (it used to copy and regex the whole source per name); these are the
+// boundaries that pass must keep: dropping a needed const → "X is not defined".
+console.log("\n== [esm] used-name detection for named-import snapshots ==");
+{
+  const src =
+    `import { used, onlyReexported, prefix, $dollar, _under, spread, member } from './a.js';\n` +
+    `import { onlyInImport } from './b.js';\n` +
+    `import { onlyInImport as renamed, héllo, wörld } from './c.js';\n` +
+    `export { onlyReexported };\n` +
+    `const prefixed = used + $dollar + _under + héllo;\n` +
+    `const list = [...spread, obj.member, renamed];\n` +
+    `// prefixedMore unprefix wörldly\n`;
+  const out = transpileEsm(src, "/names.js");
+  const kept = (name) => new RegExp("const " + name.replace("$", "\\$") + "=__oc_m\\d+\\[").test(out);
+  check("a name used in the body is kept", kept("used"));
+  check("`$` and `_` names are kept", kept("$dollar") && kept("_under"));
+  check("spread and member-access uses are kept", kept("spread") && kept("member"));
+  check("a renamed import used in the body is kept", kept("renamed"));
+  check("a non-ASCII name used in the body is kept", kept("héllo"));
+  check("a name that only prefixes longer identifiers is dropped", !kept("prefix"));
+  check("a non-ASCII name that only prefixes a longer word is dropped", !kept("wörld"));
+  check("a name appearing only in import statements is dropped", !kept("onlyInImport"));
+  check("a name appearing only in `export { … }` is dropped (lazy re-export instead)", !kept("onlyReexported"));
+}
+
 // ── 4. live-binding fallback: circular singleton used inside a function ───────
 // The eager `const X = m.X` snapshot TDZ-throws when a consumer imports a const/class/
 // singleton from a module that's mid-cycle (astro's apiContextRoutesSymbol / AstroConfig
