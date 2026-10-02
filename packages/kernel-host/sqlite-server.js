@@ -1,6 +1,18 @@
 // One live connection per VFS pathname; all SQL executes in the kernel owner.
 // Process workers use the synchronous SAB; commits acknowledge the persistence of
 // their own database file (not the whole mirror queue).
+//
+// Persistence rule: the database image is exported and mirrored only when the
+// connection is in autocommit AND SQLite's pager data version differs from the
+// one recorded with the last image handed to the mirror. Every change to the
+// database content goes through a pager write transaction, and committing one
+// bumps that version (SQLITE_FCNTL_DATA_VERSION, which SQLite documents as the
+// only mechanism that sees changes made by this connection as well as others),
+// so DML, DDL, VACUUM and file-altering PRAGMAs (user_version, application_id,
+// ...) are all seen without classifying SQL text. Reads, connection-only
+// PRAGMAs and rolled-back transactions leave it unchanged and export nothing.
+// The rule is conservative: a write transaction that modified nothing (an
+// UPDATE matching no row) still persists, and an unreadable version persists.
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 
 export async function createSqliteServer(vfs, persistence, initOptions = {}) {
@@ -24,11 +36,25 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
     : type === "n" ? Number(value)
     : type === "b" ? new Uint8Array(value) : value;
 
+  // sqlite3.h SQLITE_FCNTL_DATA_VERSION. Null when it cannot be read: null never
+  // equals a recorded version, so the caller persists.
+  const FCNTL_DATA_VERSION = capi.SQLITE_FCNTL_DATA_VERSION ?? 35;
+  const versionSlot = wasm.alloc(4);
+  function dataVersion(c) {
+    return capi.sqlite3_file_control(c.db.pointer, "main", FCNTL_DATA_VERSION, versionSlot) ? null
+      : wasm.peek(versionSlot, "i32") >>> 0;
+  }
   async function persist(c) {
     if (c.ioError) throw c.ioError;
     if (!c.path || !c.db.pointer || !capi.sqlite3_get_autocommit(c.db.pointer)) return;
+    const version = dataVersion(c);
+    if (version !== null && version === c.persistedVersion) return;
     try {
       const bytes = capi.sqlite3_js_db_export(c.db.pointer);
+      // Recorded with the snapshot rather than after the await. A failure below
+      // poisons the connection, so a version recorded for an image that never
+      // reached the mirror is never trusted.
+      c.persistedVersion = version;
       vfs.write_file(c.path, bytes);
       persistence.onWrite(c.path);
       // Only this database's own file: an unrelated path's OPFS error must not
@@ -105,15 +131,17 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
           }
         }
         const db = new oo1.DB(":memory:", "c");
-        const c = { db, client, path, poisoned: false };
+        const c = { db, client, path, poisoned: false, persistedVersion: null };
         const id = ++sequence;
         try {
+          let loaded = false;
           if (path && vfs.exists(path)) {
             const bytes = vfs.read_file(path);
             if (bytes.length) {
               const pointer = wasm.allocFromTypedArray(bytes);
               const rc = capi.sqlite3_deserialize(db.pointer, "main", pointer, BigInt(bytes.length), BigInt(bytes.length), capi.SQLITE_DESERIALIZE_FREEONCLOSE | capi.SQLITE_DESERIALIZE_RESIZEABLE);
               if (rc) fail(`SQLITE_DESERIALIZE: ${rc}`);
+              loaded = true;
             }
           }
           // Deserialize uses ATTACH internally; install the authorizer afterwards.
@@ -122,6 +150,9 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
           db.exec(`PRAGMA foreign_keys=${req.foreignKeys === false ? "OFF" : "ON"}`);
           connections.set(id, c);
           if (path) owners.set(path, id);
+          // An image just loaded from the file IS that file: nothing to write.
+          // A new or empty file is still created, and its mirror proven, on open.
+          if (loaded) c.persistedVersion = dataVersion(c);
           await persist(c);
           live(id, c);
           result = { id };
@@ -163,6 +194,8 @@ export async function createSqliteServer(vfs, persistence, initOptions = {}) {
               } else {
                 // SQLite finds boundaries, including triggers and quoted semicolons.
                 // Persist autocommits before a later BEGIN hides a committed prefix.
+                // The persist after the loop then finds the version it recorded
+                // and writes nothing, unless a statement failed after changing data.
                 const text = wasm.allocCString(req.sql);
                 const pointers = wasm.alloc(wasm.ptrSizeof * 2);
                 let cursor = text;

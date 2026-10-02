@@ -41,6 +41,12 @@ SQLite awaits `persistence.flushPath(path)`, never the global `flush()`. Run
 `test:single-kernel-lifecycle` and `test:single-kernel-close` after touching
 finalize, FsServer registration, SQLite, OPFS persistence or the host SDK close.
 
+SQLite persists its image only when the pager data version changed since the last
+persisted image (see the header of `kernel-host/sqlite-server.js`): reads,
+prepares and connection PRAGMAs must not export. `test:sqlite-persist` holds the
+invariant (outside a transaction the mirror equals the live database) and the
+per-statement persist counts; run it after touching `persist()` or the open path.
+
 Guidance for AI agents (and humans) working in this repo. Read this first, then
 read [`ARCHITECTURE.md`](./ARCHITECTURE.md) before touching the runtime, the
 protocol, or networking. [`roadmap.md`](./roadmap.md) is the chronological log of
