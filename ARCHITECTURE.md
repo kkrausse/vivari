@@ -421,7 +421,12 @@ only wired when `VV_DEBUG` is set, so non-debug runs never allocate it.
   already checked the digest of the whole container the bodies were sliced from
   passes `bodiesVerified: true`; the per-body inflate + SHA-256 is then skipped
   (it only repeated the container check) and `write_file_body`'s zlib/length
-  check is what remains, now after the roots were removed. The versioned
+  check is what remains, now after the roots were removed. Either install
+  message may carry `persist: false` for roots the caller installs again on
+  every boot: they are dropped from the OPFS mirror (`persistence.exclude`,
+  which also deletes copies an earlier boot mirrored) and stay out of it for
+  that kernel's lifetime, so they are no longer written back, restored at the
+  next boot and then overwritten. The versioned
   `install-tree-image-v1` feature is intentionally separate from ordinary
   `install-tree-v1`; modes and symlinks retain the same replacement semantics.
 - **Per-PID memory attribution**: "Measure Memory" also breaks the Process Worker heap
