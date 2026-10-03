@@ -310,20 +310,23 @@ export function createEventLoop({ isAlive, doNet, doChildren, doThreads, doWatch
     return t;
   };
 
+  // Returns whether any timer was due.
   const runDueTimers = () => {
-    if (exiting) return;
+    if (exiting) return false;
     const t = now();
     const due = [];
     for (const timer of timers.values()) if (timer._due <= t) due.push(timer);
+    if (due.length === 0) return false;
     // Fire in due order; ties break by insertion id (Node's registration order).
     due.sort((a, b) => a._due - b._due || a._id - b._id);
     for (const timer of due) {
-      if (exiting) return;
+      if (exiting) return true;
       if (!timers.has(timer._id)) continue; // cleared mid-batch
       if (timer._interval) timer._due = now() + timer._delay;
       else timers.delete(timer._id);
       runCallback(timer._cb, timer._args);
     }
+    return true;
   };
 
   // ---- immediates -----------------------------------------------------------
@@ -485,6 +488,14 @@ export function createEventLoop({ isAlive, doNet, doChildren, doThreads, doWatch
       await drainMicrotasks();
       runCallback(doThreads, []); // drain worker_threads message/online/exit (2b)
       await drainMicrotasks();
+      // Timers that came due during this turn run before the file-watch events that
+      // arrived during it, as on Node, where the timers phase precedes I/O. The turn
+      // above can be long (a dev server transforming a module), and a watcher's
+      // debounce is a short timer: chokidar drops a path's event while its 5 ms / 50 ms
+      // throttle entry stands and never emits it later, so delivering the event ahead
+      // of the expired timer loses a file change for good
+      // (scripts/test-watch-after-timers.mjs).
+      if (runDueTimers()) await drainMicrotasks();
       runCallback(doWatch, []); // drain fs.watch change events (#19 stage B)
       await drainMicrotasks();
       runCallback(doStdin, []); // drain interactive stdin keystrokes
