@@ -600,7 +600,10 @@ export class Kernel {
       // and the flowing path needs the same fact — process.stdin.isTTY was
       // hardcoded true, so `node` with no script could not tell an interactive
       // shell from a spawnSync and would sit at a prompt nobody could reach.
-      spec: { ...spec, pid, ppid: parentPid ?? 0, capture },
+      // `fsEpoch`: the shared word the filesystem replaces on every change (see
+      // fs-server.js), which lets the guest's module loader remember resolutions.
+      // Null with a filesystem that publishes none; the guest then remembers nothing.
+      spec: { ...spec, pid, ppid: parentPid ?? 0, capture, fsEpoch: this.fs?.fsEpoch ?? null },
       // #16 stage 2b: a spawned thread gets its creator's MessageChannel end as a
       // transferable, delivered to the worker as parentPort at init.
       threadPort,

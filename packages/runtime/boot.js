@@ -65,6 +65,8 @@ export function bootProcess({
   const runtime = createRuntime({
     ctrl,
     data,
+    // The filesystem epoch (kernel-host/fs-server.js), when the kernel publishes one.
+    fsEpoch: spec.fsEpoch ? new Int32Array(spec.fsEpoch) : null,
     notify: (opcode) => (isFsOpcode(opcode) ? ringFs() : send("syscall")),
     codec,
     cryptoCodec,

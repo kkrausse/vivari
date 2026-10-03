@@ -63,6 +63,9 @@ export function createDirectKernelFs(server, depCache = null) {
     async depCacheImport(key, archive, aliases = []) {
       return depCache ? depCache.importArchive(key, archive, aliases, { shipped: true }) : null;
     },
+    // The filesystem epoch's shared buffer (fs-server.js), for the kernel to hand
+    // to every process it spawns.
+    fsEpoch: server.fsEpoch?.buffer ?? null,
     setBodyConsumedHandler(fn) { server.onBodyConsumed = fn; },
     setUnlinkHandler(fn) { server.onUnlink = fn; },
   };

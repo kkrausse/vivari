@@ -97,6 +97,55 @@ const O_TRUNC = 0o1000;
 const FETCH_BODY_PREFIX = "/var/cache/vv-fetch/";
 const isFetchBody = (p) => typeof p === "string" && p.startsWith(FETCH_BODY_PREFIX);
 
+// ---- the filesystem epoch ----------------------------------------------------
+// One shared word (FsServer.fsEpoch, an Int32Array over its own
+// SharedArrayBuffer) that is replaced every time anything in the filesystem that
+// a name lookup could depend on changes: a file, directory or link created,
+// removed or renamed, or a file's contents written. It is replaced in the same
+// synchronous step as the mutation, before any syscall is answered, so a guest
+// that reads the same value twice knows that no path changed what it names and no
+// file changed its contents in between — whichever process, or the host, did the
+// writing. Every process is handed the buffer in its spawn spec (kernel.js), and
+// the module loader uses it to remember what it resolved (runtime/module.js) for
+// the price of one atomic load per lookup instead of asking the kernel again.
+//
+// A published epoch is never 0; a reader that has no buffer, or reads 0, must
+// remember nothing. Metadata-only writes (chmod, utimes) do not change it.
+//
+// `publishVfsMutations` calls `changed()` after every VFS operation that can
+// change what a path names or what a file contains. It wraps the methods ON THE
+// INSTANCE rather than the call sites, because the call sites are many and not
+// all of them go through FsServer.dispatch: the tree install, the dependency-cache
+// and OPFS restores and the SQLite image all write to this same object directly.
+// Whoever holds the VFS calls the wrapper. A VFS method added later that changes
+// names or contents has to be added to VFS_MUTATIONS, or guests will keep
+// resolving against what the filesystem was (scripts/test-resolution-memo.mjs
+// lists what moves the epoch).
+//
+// `changed()` runs after the operation, and also when it throws (a recursive
+// mkdir can fail half-way). Opening a file counts only when it can create or
+// truncate one; chmod/utimes never count, they change neither names nor contents.
+const VFS_MUTATIONS = [
+  "write_file", "write_file_body", "mkdir", "unlink", "rmdir", "rename",
+  "symlink", "link", "fd_write", "ftruncate",
+];
+function publishVfsMutations(vfs, changed) {
+  const wrap = (name, mutates) => {
+    const inner = vfs[name];
+    if (typeof inner !== "function") return;
+    vfs[name] = function (...args) {
+      const counts = mutates === null || mutates(args);
+      try {
+        return inner.apply(this, args);
+      } finally {
+        if (counts) changed();
+      }
+    };
+  };
+  for (const name of VFS_MUTATIONS) wrap(name, null);
+  wrap("open", (args) => (args[1] & (O_CREAT | O_TRUNC)) !== 0);
+}
+
 export class FsServer {
   // `persistence` (optional) is the OPFS write-behind adapter. When present we
   // forward every successful mutation to it so the VFS survives a reload; when
@@ -124,6 +173,17 @@ export class FsServer {
     // nothing, and a mutation under an unwatched top-level dir is ~O(1).
     this.watches = new Map();
     this.watchesByTop = new Map(); // top segment -> Map<key, watch>
+    // The filesystem epoch (see the note above publishVfsMutations): replaced on
+    // every mutation of this VFS, by anyone.
+    this.fsEpoch = new Int32Array(new SharedArrayBuffer(4));
+    this.fsEpoch[0] = 1;
+    publishVfsMutations(vfs, () => this.advanceFsEpoch());
+  }
+
+  // Never 0: that value tells a reader no epoch is published.
+  advanceFsEpoch() {
+    const epoch = Atomics.load(this.fsEpoch, 0);
+    Atomics.store(this.fsEpoch, 0, epoch >= 0x7fffffff ? 1 : epoch + 1);
   }
 
   // Could a mutation at `path` reach any watcher? Cheap gate for the exists()

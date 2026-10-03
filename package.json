@@ -37,6 +37,7 @@
     "test:single-kernel-lifecycle": "node scripts/test-single-kernel-lifecycle.mjs",
     "test:sqlite-persist": "node scripts/test-sqlite-persist.mjs",
     "test:module-plan-cache": "node scripts/test-module-plan-cache.mjs",
+    "test:resolution-memo": "node scripts/test-resolution-memo.mjs",
     "test:single-kernel-routing": "node scripts/test-single-kernel-routing.mjs",
     "test:sync-capture": "node scripts/test-sync-capture.mjs",
     "smoke": "node scripts/smoke-sdk.mjs",

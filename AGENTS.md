@@ -47,6 +47,16 @@ prepares and connection PRAGMAs must not export. `test:sqlite-persist` holds the
 invariant (outside a transaction the mirror equals the live database) and the
 per-statement persist counts; run it after touching `persist()` or the open path.
 
+The module loader remembers resolutions (directory listings, file kinds, parsed
+`package.json`, real paths, results) for one filesystem epoch: a shared word
+`FsServer` replaces after every VFS change of a name or of contents, handed to
+each process in its spawn spec (`fsEpoch`). The methods are wrapped on the VFS
+instance (`VFS_MUTATIONS` in `kernel-host/fs-server.js`); a new mutating VFS
+method must be added there, and nothing may write to the VFS around the instance.
+The loader remembers nothing without an epoch or once a guest replaces an `fs`
+function it uses. Run `test:resolution-memo` after touching `module.js`
+resolution, `FsServer`'s constructor or the spawn spec.
+
 Guidance for AI agents (and humans) working in this repo. Read this first, then
 read [`ARCHITECTURE.md`](./ARCHITECTURE.md) before touching the runtime, the
 protocol, or networking. [`roadmap.md`](./roadmap.md) is the chronological log of

@@ -97,7 +97,25 @@ export function parseShellShimTarget(source) {
   return (m && m[1]) || null;
 }
 
-export function createModuleSystem({ fs, path, builtins, process, globals, nodeModules }) {
+// An absolute path with nothing left to normalise: no empty, "." or ".." segment
+// and no trailing slash. Only such a path can be looked up by splitting it at its
+// last slash, which is what the loader's memory of the filesystem does.
+const UNNORMALISED = /\/(?:\.{1,2})?(?:\/|$)/;
+const isPlainPath = (p) => p.charCodeAt(0) === 47 && !UNNORMALISED.test(p);
+const parentOf = (p) => {
+  const slash = p.lastIndexOf("/");
+  return slash === 0 ? "/" : p.slice(0, slash);
+};
+const nameOf = (p) => p.slice(p.lastIndexOf("/") + 1);
+const NO_THROW = { throwIfNoEntry: false };
+const MISSING = 0;
+const FILE = 1;
+const OTHER = 2;
+
+// `fsEpoch` (optional) returns the filesystem epoch the kernel publishes
+// (kernel-host/fs-server.js), or 0 when it publishes none. Without it the
+// loader remembers nothing about the filesystem and asks every time.
+export function createModuleSystem({ fs, path, builtins, process, globals, nodeModules, fsEpoch = null }) {
   const cache = Object.create(null);
   const modulePlans = createModulePlanCache({ fs, process });
   // The entry module (Node's `require.main` / `process.mainModule`). Set by
@@ -146,7 +164,105 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
     this.paths = [];
   }
 
+  // ── What the loader remembers about the filesystem ──────────────────────────
+  //
+  // Resolving one name asks the filesystem dozens of questions (nine extensions,
+  // a package.json and an index per candidate, at every node_modules level), each
+  // a synchronous round trip to the kernel, and a program asks for the same names
+  // over and over: a Vite dev server start made 2,400 resolutions, 70% of them of
+  // a module it had already loaded, through 54,000 round trips. So the answers are
+  // kept: which names a directory holds, whether a path is a file, a package.json's
+  // parsed contents, a path's real path, and what a request resolved to from a
+  // directory.
+  //
+  // THE RULE: everything here is valid for exactly one filesystem epoch. The
+  // kernel replaces the epoch, in the same synchronous step as the change itself,
+  // whenever any process or the host creates, removes or renames anything or
+  // writes any file's contents, so an unchanged epoch means every remembered
+  // answer is still what the filesystem would say. `remembering()` runs before
+  // every use and drops all of it when the epoch moved. There is no per-path
+  // invalidation to get wrong, and no time-based expiry: an install, an edit, a
+  // new file or a changed package.json all take effect on the very next lookup.
+  //
+  // Nothing is remembered when the kernel publishes no epoch, or once the guest
+  // has replaced any `fs` function used here (a tracer, graceful-fs, a virtual
+  // filesystem patch): those calls then go to the guest's functions every time,
+  // as they always did.
+  const pristine = {
+    statSync: fs.statSync,
+    lstatSync: fs.lstatSync,
+    readdirSync: fs.readdirSync,
+    readlinkSync: fs.readlinkSync,
+    readFileSync: fs.readFileSync,
+    realpathSync: fs.realpathSync,
+  };
+  const memo = {
+    epoch: 0,
+    listings: new Map(), // directory -> Set of names | null (not a directory) | false (unknown)
+    kinds: new Map(), // path -> MISSING | FILE | OTHER
+    packages: new Map(), // package.json path -> parsed | null
+    reals: new Map(), // path -> real path
+    resolved: new Map(), // directory -> Map(request -> resolved path)
+    hits: 0,
+    misses: 0,
+    flushes: 0,
+  };
+  function remembering() {
+    if (fsEpoch === null) return false;
+    const epoch = fsEpoch();
+    if (epoch === 0) return false;
+    for (const name in pristine) if (fs[name] !== pristine[name]) return false;
+    if (epoch !== memo.epoch) {
+      if (memo.epoch !== 0) memo.flushes++;
+      memo.epoch = epoch;
+      memo.listings.clear();
+      memo.kinds.clear();
+      memo.packages.clear();
+      memo.reals.clear();
+      memo.resolved.clear();
+    }
+    return true;
+  }
+
+  // The names in a directory, so that a path whose name is not among them is known
+  // to be missing without asking: most of what resolution probes does not exist.
+  // A directory that is itself absent from its parent's listing costs nothing
+  // either. `false` (could not list, for a reason other than "not a directory")
+  // makes the caller ask about the path directly.
+  function listing(dir) {
+    let names = memo.listings.get(dir);
+    if (names !== undefined) return names;
+    const above = dir === "/" ? false : listing(parentOf(dir));
+    if (above === null || (above && !above.has(nameOf(dir)))) names = null;
+    else {
+      try {
+        names = new Set(fs.readdirSync(dir));
+      } catch (e) {
+        names = e && (e.code === "ENOENT" || e.code === "ENOTDIR") ? null : false;
+      }
+    }
+    memo.listings.set(dir, names);
+    return names;
+  }
+  function kindOf(p) {
+    let kind = memo.kinds.get(p);
+    if (kind !== undefined) return kind;
+    const names = listing(parentOf(p));
+    if (names === null || (names && !names.has(nameOf(p)))) kind = MISSING;
+    else {
+      try {
+        const st = fs.statSync(p, NO_THROW); // follows links, like the probe below
+        kind = st === undefined ? MISSING : st.isFile() ? FILE : OTHER;
+      } catch {
+        kind = MISSING;
+      }
+    }
+    memo.kinds.set(p, kind);
+    return kind;
+  }
+
   const isFile = (p) => {
+    if (remembering() && isPlainPath(p)) return kindOf(p) === FILE;
     try {
       return fs.statSync(p).isFile();
     } catch {
@@ -171,14 +287,25 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
     return null;
   };
 
-  const readPkg = (dir) => {
-    const p = path.join(dir, "package.json");
+  const parsePkg = (p) => {
     if (!isFile(p)) return null;
     try {
       return JSON.parse(fs.readFileSync(p, "utf8"));
     } catch {
       return null;
     }
+  };
+  // The parsed object is shared between callers while it is remembered. It never
+  // leaves this file and nothing here writes to it.
+  const readPkg = (dir) => {
+    const p = path.join(dir, "package.json");
+    if (!remembering() || !isPlainPath(p)) return parsePkg(p);
+    let pkg = memo.packages.get(p);
+    if (pkg === undefined) {
+      pkg = parsePkg(p);
+      memo.packages.set(p, pkg);
+    }
+    return pkg;
   };
 
   // package.json "exports"/"imports" condition resolution. Everything in this
@@ -382,9 +509,48 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
       if (hasLazyBuiltin(request)) return { builtin: true, id: request };
     }
 
+    // Everything above (plugins, builtins) is decided afresh every time. What
+    // follows is a function of the filesystem, the request and the directory
+    // alone (the conditions are fixed: EXPORT_CONDITIONS), so a result found
+    // earlier in this filesystem epoch is the result. A relative directory is
+    // made absolute first, since what it means depends on the cwd.
+    const remember = remembering();
+    const epoch = memo.epoch;
+    if (remember) {
+      if (!isPlainPath(fromDir)) fromDir = path.resolve(fromDir);
+      const known = memo.resolved.get(fromDir);
+      const id = known === undefined ? undefined : known.get(request);
+      if (id !== undefined) {
+        memo.hits++;
+        return { builtin: false, id };
+      }
+      memo.misses++;
+    }
+    const found = resolveOnDisk(request, fromDir);
+    if (found === null) {
+      // Nothing installed — fall back to the vendored copy.
+      if (overridable && (hasBuiltin(request) || hasLazyBuiltin(request)))
+        return { builtin: true, id: request };
+      const err = new Error(`Cannot find module '${request}' from '${fromDir}'`);
+      err.code = "MODULE_NOT_FOUND";
+      throw err;
+    }
+    // A failure is not remembered: it is rare, and looking again is cheap now.
+    // Nor is a result found while the filesystem changed underneath the search.
+    if (remember && remembering() && memo.epoch === epoch) {
+      let known = memo.resolved.get(fromDir);
+      if (known === undefined) memo.resolved.set(fromDir, (known = new Map()));
+      known.set(request, found);
+    }
+    return { builtin: false, id: found };
+  }
+
+  // The filesystem half of resolution: the resolved path, or null when there is
+  // none. Throws for a '#' import or a package subpath that is not defined.
+  function resolveOnDisk(request, fromDir) {
     if (request[0] === "#") {
       const r = resolveImports(request, fromDir);
-      if (r) return { builtin: false, id: r };
+      if (r) return r;
       const err = new Error(`Cannot find package import '${request}' from '${fromDir}'`);
       err.code = "MODULE_NOT_FOUND";
       throw err;
@@ -424,15 +590,7 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
       }
     }
 
-    if (!resolved) {
-      // Nothing installed — fall back to the vendored copy.
-      if (overridable && (hasBuiltin(request) || hasLazyBuiltin(request)))
-        return { builtin: true, id: request };
-      const err = new Error(`Cannot find module '${request}' from '${fromDir}'`);
-      err.code = "MODULE_NOT_FOUND";
-      throw err;
-    }
-    return { builtin: false, id: resolved };
+    return resolved || null;
   }
 
   // Node resolves a module's path through symlinks to its realpath by default
@@ -442,8 +600,33 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
   // and the bin does `import('../dist/node/cli.js')` — which only resolves if the
   // entry's dirname is `vite/bin`, not `.bin`. Fall back to the given path if the
   // fs has no realpath or the path doesn't exist.
+  //
+  // Remembered per path COMPONENT: a directory's real path is worked out once, and
+  // every file in it then costs one lstat of its own, where fs.realpathSync walks
+  // the whole path again each time (a dozen lstats for a file in node_modules).
+  // Throws what lstat/readlink throw, or ELOOP, for the caller below to swallow.
+  function realOf(p, hops) {
+    if (p === "/") return p;
+    let real = memo.reals.get(p);
+    if (real !== undefined) return real;
+    const above = realOf(parentOf(p), hops);
+    const here = above === "/" ? "/" + nameOf(p) : above + "/" + nameOf(p);
+    if (fs.lstatSync(here).isSymbolicLink()) {
+      if (++hops.count > 40) {
+        const err = new Error(`ELOOP: too many symbolic links encountered, realpath '${p}'`);
+        err.code = "ELOOP";
+        throw err;
+      }
+      real = realOf(path.resolve(above, fs.readlinkSync(here)), hops);
+    } else {
+      real = here;
+    }
+    memo.reals.set(p, real);
+    return real;
+  }
   const realpath = (p) => {
     try {
+      if (remembering() && isPlainPath(p)) return realOf(p, { count: 0 });
       return fs.realpathSync(p);
     } catch {
       return p;
@@ -1080,6 +1263,8 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
     checkSyntax,
     Module,
     cache,
+    // How the loader's memory of the filesystem has been doing (diagnostics).
+    resolutionStats: () => ({ hits: memo.hits, misses: memo.misses, flushes: memo.flushes, epoch: memo.epoch }),
     setMainModule: (m) => (mainModule = m),
     // True while the main module is still suspended on a top-level await.
     isMainPending: () => mainPendingPromise !== null,

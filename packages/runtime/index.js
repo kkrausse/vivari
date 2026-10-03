@@ -93,6 +93,10 @@ export function createRuntime({
   ctrl,
   data,
   notify,
+  // The shared word the filesystem's owner replaces on every change of a name or
+  // of a file's contents (kernel-host/fs-server.js), as an Int32Array. Null when
+  // the kernel publishes none.
+  fsEpoch = null,
   pid = 1,
   ppid = 0,
   argv = [],
@@ -1711,7 +1715,11 @@ export function createRuntime({
   const sqlite = createSqlite({ fs, path, process, syscalls, Buffer });
   builtins.sqlite = sqlite.node;
   builtins["node:sea"] = createSea();
-  const moduleSystem = createModuleSystem({ fs, path, builtins, process, globals, nodeModules });
+  const moduleSystem = createModuleSystem({
+    fs, path, builtins, process, globals, nodeModules,
+    // What lets the loader remember resolutions between filesystem changes.
+    fsEpoch: fsEpoch ? () => Atomics.load(fsEpoch, 0) : null,
+  });
 
   // `node --check` lives in the /bin/node.js shim, which is guest source and so cannot
   // import the loader. A global is how the runtime hands guest programs a seam it owns
