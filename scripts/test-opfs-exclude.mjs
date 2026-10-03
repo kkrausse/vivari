@@ -120,4 +120,21 @@ await installTree(k.server, await tree(true, 4));
 await k.persistence.flush();
 assert.equal(await mirrored("/app/server.js"), "server 4");
 k.close();
+
+// Boot 5: a kernel that died in the middle of a delete. The queue removes bytes before
+// the manifest forgets them, so the manifest can list files that are gone (seen live:
+// a tab reloaded while the first `persist: false` install was dropping the old /app,
+// after which every open failed with "OPFS restore failed for /app/…: NotFoundError").
+// The boot must come up with everything else and stop listing what is gone.
+const files = await (await opfs.getDirectoryHandle("exclude")).getDirectoryHandle("files");
+await files.removeEntry("app");
+(await (await files.getDirectoryHandle("workspace")).getDirectoryHandle("src")).entries.delete("new.ts");
+assert.ok((await indexed()).includes("/app/server.js"));
+k = await boot();
+for (const [path, body] of Object.entries(kept)) assert.equal(k.text(path), body, path);
+assert.equal(k.text("/app/server.js"), undefined);
+assert.equal(k.text("/workspace/src/new.ts"), undefined);
+await k.persistence.flush();
+assert.deepEqual((await indexed()).filter(path => path === "/app/server.js" || path === "/workspace/src/new.ts"), []);
+k.close();
 console.log("PASS opfs exclude: managed roots leave the mirror, everything else stays");

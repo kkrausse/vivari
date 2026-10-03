@@ -368,6 +368,13 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
 
     const total = sorted.length;
     let n = 0;
+    // Files the manifest lists whose bytes are gone. The queue writes a file's bytes
+    // before the manifest names it, and removes bytes before the manifest forgets
+    // them, so this is what a delete looks like when the kernel died between the two
+    // (a tab reloaded while a subtree was being removed). The delete was the intent:
+    // finish it by forgetting the entry, instead of failing this and every later
+    // boot on a file nobody can restore.
+    const gone = [];
     if (typeof onProgress === "function") onProgress(0, total);
     // Sequential replay. An earlier attempt to overlap the per-file OPFS reads
     // with bounded concurrency stalled near the end of a large restore: opening
@@ -382,7 +389,16 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
         } else if (m.k === "file") {
           const slash = path.lastIndexOf("/");
           if (slash > 0) access.mkdirp(path.slice(0, slash));
-          access.writeFile(path, await readBytes(path));
+          let bytes;
+          try {
+            bytes = await readBytes(path);
+          } catch (error) {
+            if (error.name !== "NotFoundError") throw error;
+            meta.delete(path);
+            gone.push(path);
+            continue;
+          }
+          access.writeFile(path, bytes);
         } else if (m.k === "symlink") {
           const slash = path.lastIndexOf("/");
           if (slash > 0) access.mkdirp(path.slice(0, slash));
@@ -398,6 +414,11 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
       }
     }
     if (typeof onProgress === "function") onProgress(n, total);
+    if (gone.length) {
+      console.warn(`[opfs] ${gone.length} listed file(s) had no bytes (an interrupted delete); dropped from the manifest: ${gone.slice(0, 5).join(", ")}${gone.length > 5 ? ", …" : ""}`);
+      manifestDirty = true;
+      void maybeWriteManifest(true);
+    }
     return n;
   }
 
