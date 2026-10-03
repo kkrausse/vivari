@@ -9,11 +9,20 @@ export async function installTree(server, { roots, entries }) {
 // retained raw/zlib body representation. Logical bytes are validated before any
 // managed root is removed, then the checked bodies are inserted without running
 // the level-6 compressor again.
-export async function installTreeImage(server, { roots, entries }) {
-  return installTreeImpl(server, { roots, entries }, true);
+//
+// `bodiesVerified: true` is the caller's statement that every body is a slice of
+// one container whose digest it has already checked against a manifest that also
+// names these entries, and that the container was built from files matching the
+// entries' digests. Inflating and hashing each body again then only repeats that
+// check (10k inflates + digests, ~1.6 s for a 46 MB image), so it is skipped.
+// Structure, paths, modes and symlinks are still validated before any root is
+// removed, and `write_file_body` still rejects a malformed or mis-sized zlib
+// stream while inserting. Without the flag every body is checked as before.
+export async function installTreeImage(server, { roots, entries, bodiesVerified }) {
+  return installTreeImpl(server, { roots, entries }, true, bodiesVerified === true);
 }
 
-async function installTreeImpl(server, { roots, entries }, encoded) {
+async function installTreeImpl(server, { roots, entries }, encoded, bodiesVerified = false) {
   const started = performance.now();
   const validPath = (p) => typeof p === "string" && p.startsWith("/") && p !== "/"
     && !p.split("/").slice(1).some(part => !part || part === "." || part === ".." || /[\\\0]/.test(part));
@@ -61,7 +70,9 @@ async function installTreeImpl(server, { roots, entries }, encoded) {
       .pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
   };
   const hashes = new Map(), files = entries.filter(e => e.kind === "file");
-  if (encoded) {
+  if (encoded && bodiesVerified) {
+    // Trusted container: see installTreeImage. Nothing to hash.
+  } else if (encoded) {
     let next = 0;
     const results = await Promise.allSettled(Array.from({ length: Math.min(8, files.length) }, async () => {
       while (next < files.length) {
