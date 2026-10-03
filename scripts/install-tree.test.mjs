@@ -98,5 +98,19 @@ test('prepared VFS bodies validate logical bytes before replacement and preserve
     assert.equal(JSON.parse(vfs.lstat('/workspace/deps')).mode & 0o777, 0o750);
     assert.equal(JSON.parse(vfs.lstat('/workspace/deps/tool')).mode & 0o777, 0o751);
     assert.ok(Number(vfs.mem_bytes()) < Number(vfs.logical_mem_bytes()));
+    // A caller that verified the whole container skips the per-body digest: the
+    // entry's sha256 is then not consulted, but the VFS still refuses a zlib
+    // stream that is malformed or does not inflate to the declared length.
+    const verified = await installTreeImage(server, { roots: ['/workspace/deps'], bodiesVerified: true, entries: [directory,
+      { ...file, sha256: '0'.repeat(64) }] });
+    assert.equal(verified.files, 1);
+    assert.deepEqual(vfs.read_file('/workspace/deps/tool'), raw);
+    await assert.rejects(installTreeImage(server, { roots: ['/workspace/deps'], bodiesVerified: true, entries: [directory,
+      { ...file, bytes: trailing }] }), /malformed compressed file body/);
+    await assert.rejects(installTreeImage(server, { roots: ['/workspace/deps'], bodiesVerified: true, entries: [directory,
+      { ...file, logicalBytes: raw.length + 1 }] }), /malformed compressed file body/);
+    // Anything but the literal true keeps the per-body check.
+    await assert.rejects(installTreeImage(server, { roots: ['/workspace/deps'], bodiesVerified: 'yes', entries: [directory,
+      { ...file, sha256: '0'.repeat(64) }] }), /integrity failure/);
   } finally { vfs.free(); }
 });

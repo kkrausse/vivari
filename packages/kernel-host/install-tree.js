@@ -1,19 +1,33 @@
 // Verified disposable trees are installed on the VFS-owning thread. No per-file
 // syscall, guest process, or main-thread round trip is needed. Call before launch;
 // this replaces the supplied roots and is not a transactional live-tree update.
-export async function installTree(server, { roots, entries }) {
-  return installTreeImpl(server, { roots, entries }, false);
+//
+// `persist: false` says the caller installs these roots again on every boot before
+// anything reads them. They then leave the OPFS mirror: copies an earlier boot
+// mirrored are deleted, and nothing under the roots is mirrored for the rest of
+// this kernel's lifetime. Default (omitted): mirrored like any other path.
+export async function installTree(server, { roots, entries, persist }) {
+  return installTreeImpl(server, { roots, entries }, false, false, persist !== false);
 }
 
 // Install a preparation-built image whose file entries already carry the VFS's
 // retained raw/zlib body representation. Logical bytes are validated before any
 // managed root is removed, then the checked bodies are inserted without running
 // the level-6 compressor again.
-export async function installTreeImage(server, { roots, entries }) {
-  return installTreeImpl(server, { roots, entries }, true);
+//
+// `bodiesVerified: true` is the caller's statement that every body is a slice of
+// one container whose digest it has already checked against a manifest that also
+// names these entries, and that the container was built from files matching the
+// entries' digests. Inflating and hashing each body again then only repeats that
+// check (10k inflates + digests, ~1.6 s for a 46 MB image), so it is skipped.
+// Structure, paths, modes and symlinks are still validated before any root is
+// removed, and `write_file_body` still rejects a malformed or mis-sized zlib
+// stream while inserting. Without the flag every body is checked as before.
+export async function installTreeImage(server, { roots, entries, bodiesVerified, persist }) {
+  return installTreeImpl(server, { roots, entries }, true, bodiesVerified === true, persist !== false);
 }
 
-async function installTreeImpl(server, { roots, entries }, encoded) {
+async function installTreeImpl(server, { roots, entries }, encoded, bodiesVerified = false, persist = true) {
   const started = performance.now();
   const validPath = (p) => typeof p === "string" && p.startsWith("/") && p !== "/"
     && !p.split("/").slice(1).some(part => !part || part === "." || part === ".." || /[\\\0]/.test(part));
@@ -61,7 +75,9 @@ async function installTreeImpl(server, { roots, entries }, encoded) {
       .pipeThrough(new DecompressionStream("deflate"))).arrayBuffer());
   };
   const hashes = new Map(), files = entries.filter(e => e.kind === "file");
-  if (encoded) {
+  if (encoded && bodiesVerified) {
+    // Trusted container: see installTreeImage. Nothing to hash.
+  } else if (encoded) {
     let next = 0;
     const results = await Promise.allSettled(Array.from({ length: Math.min(8, files.length) }, async () => {
       while (next < files.length) {
@@ -122,6 +138,9 @@ async function installTreeImpl(server, { roots, entries }, encoded) {
     } else vfs.unlink(path);
     persistence?.onDelete(path);
   }
+  // Before the removal below, so its per-path deletes and the writes after it are
+  // not queued for these roots; exclude() itself queues the one subtree delete.
+  if (!persist) for (const root of roots) persistence?.exclude?.(root);
   for (const root of roots) remove(root);
   const directories = entries.filter(e => e.kind === "directory").sort((a, b) => a.path.length - b.path.length);
   for (const e of directories) { vfs.mkdir(e.path, true); persistence?.onWrite(e.path); }

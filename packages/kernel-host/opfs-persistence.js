@@ -157,6 +157,23 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
     }
   }
 
+  // Roots a bulk installer writes again on every boot (install-tree `persist:
+  // false`). Mirroring them is paid three times: written to OPFS after each
+  // install, restored at the next boot, then deleted and rewritten by the same
+  // installer moments later. Excluded for this kernel's lifetime; the installer
+  // excludes them again on the next boot before it writes.
+  const excluded = [];
+  const basePersist = shouldPersist;
+  shouldPersist = (path) => basePersist(path) && !excluded.some(root => path === root || path.startsWith(root + "/"));
+  // Stop mirroring `root` and drop whatever an earlier boot mirrored under it (the
+  // delete is queued before the exclusion applies, so it reaches OPFS and the
+  // manifest). Nothing outside `root` is touched.
+  function exclude(root) {
+    if (excluded.includes(root)) return;
+    onDelete(root);
+    excluded.push(root);
+  }
+
   // ---- the write-behind queue ----------------------------------------------
   function onWrite(path) {
     if (!shouldPersist(path)) return;
@@ -384,5 +401,5 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
     return n;
   }
 
-  return { onWrite, onDelete, onRename, flush, flushPath, restore, shouldPersist, releaseOwnership };
+  return { onWrite, onDelete, onRename, exclude, flush, flushPath, restore, shouldPersist: (path) => shouldPersist(path), releaseOwnership };
 }

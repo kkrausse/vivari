@@ -98,12 +98,15 @@ export class Host {
   async readdir(path: string): Promise<string[]> {
     return ((await this.request("vv-readdir", { path })).entries as { name: string }[]).map(e => e.name);
   }
-  async installTree(tree: { roots: string[]; entries: InstallTreeEntry[] }): Promise<TreeInstallResult> {
+  /** `persist: false`: the roots are reinstalled on every boot, so keep them out of the OPFS mirror. */
+  async installTree(tree: { roots: string[]; entries: InstallTreeEntry[]; persist?: boolean }): Promise<TreeInstallResult> {
     if (!this.features.has("install-tree-v1")) throw new Error("Runtime lacks verified tree installation");
     const result = await this.request("workspace-install-tree", tree);
     return { files: Number(result.files), verifyMs: Number(result.verifyMs), installMs: Number(result.installMs), readbackMs: Number(result.readbackMs) };
   }
-  async installTreeImage(tree: { roots: string[]; entries: InstallTreeImageEntry[] }): Promise<TreeInstallResult> {
+  /** `bodiesVerified`: the bodies are slices of a container whose digest the caller
+   * already checked; skip the per-file inflate + SHA-256 (see install-tree.js). `persist`: as installTree. */
+  async installTreeImage(tree: { roots: string[]; entries: InstallTreeImageEntry[]; bodiesVerified?: boolean; persist?: boolean }): Promise<TreeInstallResult> {
     if (!this.features.has("install-tree-image-v1")) throw new Error("Runtime lacks prepared tree image installation");
     const buffers = [...new Set(tree.entries.flatMap(entry => entry.kind === "file" ? [entry.bytes.buffer] : []))];
     const result = await this.request("workspace-install-tree-image", tree, buffers);
